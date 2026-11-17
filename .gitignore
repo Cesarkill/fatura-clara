@@ -1,0 +1,6 @@
+.firebase/
+node_modules/
+*.ofx
+!fatura-exemplo.ofx
+*.xlsx
+*.csv

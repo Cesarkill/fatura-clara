@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="light">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fatura Clara — Análise de faturas de cartão de crédito</title>
+  <meta name="description"
+    content="Importe as faturas do seu cartão em OFX e entenda seus gastos: categorias, parcelamentos, encargos e evolução mês a mês. Processamento 100% local no seu navegador." />
+  <link rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231d4ed8'/%3E%3Cpath d='M9 17l4 4 10-10' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=6" />
+  <script>
+
+    (function () {
+      try {
+        var t = localStorage.getItem('fc_theme');
+        if (t) document.documentElement.setAttribute('data-theme', t);
+      } catch (e) { }
+    })();
+  </script>
+</head>
+
+<body>
+
+  <header class="header">
+    <div class="header-inner">
+      <a class="brand" href="#" id="brand-link" aria-label="Fatura Clara — início">
+        <svg class="brand-mark" viewBox="0 0 34 34" aria-hidden="true">
+          <rect width="34" height="34" rx="9" fill="#1d4ed8" />
+          <rect x="8" y="10" width="18" height="14" rx="2.5" fill="none" stroke="#fff" stroke-width="2" />
+          <path d="M8 14.5h18" stroke="#fff" stroke-width="2" />
+          <path d="M12 19.5h4" stroke="#fff" stroke-width="2" stroke-linecap="round" />
+        </svg>
+        <div>
+          <div class="brand-name">Fatura Clara</div>
+          <div class="brand-tag">Análise de faturas de cartão de crédito</div>
+        </div>
+      </a>
+
+      <div class="header-actions">
+        <span class="privacy-chip"
+          title="Os arquivos são lidos e processados apenas no seu navegador. Nada é enviado para servidores.">
+          <span data-icon="lock" data-size="13"></span>
+          Processamento 100% local
+        </span>
+
+        <button type="button" class="icon-btn" id="btn-theme" title="Alternar tema claro/escuro"
+          aria-label="Alternar tema">
+          <span data-icon="moon"></span>
+        </button>
+
+        <div class="dropdown hidden" id="more-dropdown">
+          <button type="button" class="icon-btn" id="btn-more" title="Mais opções" aria-label="Mais opções"
+            aria-haspopup="true">
+            <span data-icon="more"></span>
+          </button>
+          <div class="menu hidden" id="more-menu" role="menu">
+            <button type="button" class="menu-item" id="menu-export"><span data-icon="download"></span> Exportar
+              planilha (Excel)</button>
+            <button type="button" class="menu-item" id="menu-export-csv"><span data-icon="file"></span> Exportar CSV
+              simples</button>
+            <button type="button" class="menu-item" id="menu-print"><span data-icon="printer"></span> Imprimir / salvar
+              em PDF</button>
+            <button type="button" class="menu-item" id="menu-invert"><span data-icon="repeat"></span> Inverter sinais
+              (+/−)</button>
+            <div class="menu-sep"></div>
+            <button type="button" class="menu-item danger" id="menu-clear"><span data-icon="trash"></span> Apagar todos
+              os dados</button>
+          </div>
+        </div>
+
+        <label for="file-input" class="btn btn-primary" id="btn-import-header">
+          <span data-icon="upload"></span>
+          <span>Importar faturas</span>
+        </label>
+        <input type="file" id="file-input" accept=".ofx,.qfx,.xml,.txt" multiple class="hidden" />
+      </div>
+    </div>
+  </header>
+
+
+  <section class="empty" id="empty-state">
+    <div class="empty-head">
+      <span class="eyebrow">Gratuito · Sem cadastro</span>
+      <h1>Entenda suas faturas de cartão<br />com clareza</h1>
+      <p class="empty-lead">
+        Importe os arquivos OFX das suas faturas e veja para onde vai o seu dinheiro: categorias,
+        parcelamentos, juros e a evolução dos gastos mês a mês.
+      </p>
+    </div>
+
+    <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Selecionar arquivos OFX">
+      <div class="dropzone-icon"><span data-icon="upload" data-size="22"></span></div>
+      <div class="dropzone-title">Arraste os arquivos .OFX das suas faturas aqui</div>
+      <div class="dropzone-sub">Você pode selecionar várias faturas de uma vez, uma por mês.</div>
+      <div class="dropzone-actions">
+        <label for="file-input" class="btn btn-primary btn-lg"><span data-icon="file"></span> Selecionar
+          arquivos</label>
+        <button type="button" class="btn btn-lg" id="btn-sample">Ver com dados de exemplo</button>
+      </div>
+    </div>
+
+    <div class="trust-row">
+      <div class="trust-item">
+        <div class="trust-icon"><span data-icon="shield" data-size="18"></span></div>
+        <div>
+          <strong>Seus dados não saem do seu computador</strong>
+          <p>A leitura é feita no seu navegador. Nenhum arquivo é enviado para servidores.</p>
+        </div>
+      </div>
+      <div class="trust-item">
+        <div class="trust-icon"><span data-icon="bank" data-size="18"></span></div>
+        <div>
+          <strong>Compatível com os principais bancos</strong>
+          <p>Nubank, Itaú, Bradesco, Santander, Inter, C6, BB, Caixa e outros que exportam OFX.</p>
+        </div>
+      </div>
+      <div class="trust-item">
+        <div class="trust-icon"><span data-icon="check" data-size="18"></span></div>
+        <div>
+          <strong>Confere com o valor do banco</strong>
+          <p>Usamos o saldo oficial informado no arquivo e mostramos se houver qualquer diferença.</p>
+        </div>
+      </div>
+    </div>
+
+    <details class="howto">
+      <summary><span data-icon="info"></span> Como obter o arquivo OFX da sua fatura</summary>
+      <ol>
+        <li>Abra o aplicativo ou o internet banking do seu banco e acesse a área do cartão de crédito.</li>
+        <li>Escolha a fatura desejada e procure a opção <strong>Exportar</strong>, <strong>Baixar extrato</strong> ou
+          <strong>OFX</strong>.</li>
+        <li>Salve o arquivo <code>.ofx</code> no seu computador e arraste-o para esta página.</li>
+        <li>Repita para outros meses: quanto mais faturas, melhor o comparativo.</li>
+      </ol>
+    </details>
+  </section>
+
+  <!-- ================= App ================= -->
+  <div class="layout hidden" id="app-shell">
+    <aside class="sidebar">
+      <div class="side-card">
+        <div class="side-title">
+          <span>Suas faturas</span>
+          <span id="stmt-count" class="badge">0</span>
+        </div>
+        <div class="stmt-list" id="stmt-list"></div>
+        <button type="button" class="add-stmt" id="btn-add-stmt"><span data-icon="plus"></span> Adicionar
+          faturas</button>
+      </div>
+      <div class="side-note">
+        <span data-icon="lock" data-size="14"></span>
+        <div>
+          As faturas ficam salvas apenas neste navegador, para você não precisar importar de novo.
+          <br />
+          <button type="button" class="link-btn" id="btn-clear-side">Apagar todos os dados</button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main" id="main">
+      <div class="banner hidden" id="sample-banner">
+        <div class="banner-text"><span data-icon="info"></span> Você está vendo dados de exemplo. Importe suas faturas
+          para ver a sua análise.</div>
+        <label for="file-input" class="btn btn-sm btn-primary">Importar minhas faturas</label>
+      </div>
+
+      <div class="page-head">
+        <div>
+          <h2 class="page-title" id="page-title">—</h2>
+          <div class="page-sub" id="page-sub"></div>
+        </div>
+        <div class="page-actions">
+          <button type="button" class="btn btn-sm" id="btn-speak-summary"><span data-icon="volume"></span> Ouvir
+            resumo</button>
+          <button type="button" class="btn btn-sm" id="btn-speak-all"><span data-icon="volume"></span> Ouvir todos os
+            gastos</button>
+          <button type="button" class="btn btn-sm hidden" id="btn-speak-stop"><span data-icon="stop"></span>
+            Parar</button>
+          <button type="button" class="btn btn-sm" id="btn-export"><span data-icon="download"></span> Exportar
+            planilha</button>
+        </div>
+      </div>
+
+      <section class="kpi-grid" id="kpi-grid"></section>
+
+      <section class="card">
+        <div class="card-head" style="margin-bottom: 10px;">
+          <div class="card-title">Resumo</div>
+        </div>
+        <p class="summary-text" id="summary-text"></p>
+      </section>
+
+      <div id="view-content" style="display: flex; flex-direction: column; gap: 16px;"></div>
+
+      <!-- Lançamentos -->
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">Lançamentos</div>
+            <div class="card-sub">Ajuste a categoria de qualquer lançamento: a escolha vale para o mesmo estabelecimento
+              nas outras faturas.</div>
+          </div>
+          <span class="badge badge-primary num" id="table-summary">0 lançamentos</span>
+        </div>
+
+        <div class="filters">
+          <div class="search-wrap">
+            <span data-icon="search"></span>
+            <input type="search" id="f-search" class="input" placeholder="Buscar por estabelecimento, valor ou data" />
+          </div>
+          <select id="f-category" class="select" aria-label="Filtrar por categoria"></select>
+          <select id="f-type" class="select" aria-label="Filtrar por tipo">
+            <option value="ALL">Todos os tipos</option>
+            <option value="EXPENSE">Gastos</option>
+            <option value="PURCHASE">Somente compras</option>
+            <option value="INSTALLMENT">Parcelados</option>
+            <option value="SUBSCRIPTION">Assinaturas</option>
+            <option value="FEES">Juros, multas e dívidas</option>
+            <option value="DUPLICATE">Possíveis duplicidades</option>
+            <option value="REFUND">Estornos e créditos</option>
+            <option value="PAYMENT">Pagamentos</option>
+            <option value="CARRYOVER">Saldo da fatura anterior</option>
+          </select>
+          <select id="f-tag" class="select" aria-label="Filtrar por marcação">
+            <option value="ALL">Todas as marcações</option>
+            <option value="essencial">Essencial</option>
+            <option value="superfluo">Supérfluo</option>
+            <option value="reembolsavel">Reembolsável</option>
+            <option value="revisar">Revisar</option>
+          </select>
+          <select id="f-sort" class="select" aria-label="Ordenação">
+            <option value="DATE_DESC">Mais recentes</option>
+            <option value="DATE_ASC">Mais antigos</option>
+            <option value="AMOUNT_DESC">Maior valor</option>
+            <option value="AMOUNT_ASC">Menor valor</option>
+            <option value="NAME_ASC">Nome (A–Z)</option>
+          </select>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th data-sort="DATE">Data</th>
+                <th data-sort="NAME">Descrição</th>
+                <th>Categoria</th>
+                <th id="th-stmt" class="hidden">Fatura</th>
+                <th>Marcação</th>
+                <th data-sort="AMOUNT" style="text-align: right;">Valor</th>
+              </tr>
+            </thead>
+            <tbody id="tx-body"></tbody>
+          </table>
+        </div>
+        <div class="table-foot hidden" id="table-foot">
+          <button type="button" class="btn btn-sm" id="btn-more-rows">Mostrar mais</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <span><span data-icon="shield" data-size="14"></span> Seus arquivos são processados localmente e nunca enviados a
+        servidores.</span>
+      <span>Fatura Clara · Ferramenta informativa, não substitui a fatura oficial do seu banco.</span>
+    </div>
+  </footer>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="app.js?v=6"></script>
+</body>
+
+</html>
