@@ -12,7 +12,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=6" />
+  <link rel="stylesheet" href="styles.css?v=7" />
   <script>
 
     (function () {
@@ -175,6 +175,7 @@
           <div class="page-sub" id="page-sub"></div>
         </div>
         <div class="page-actions">
+          <select id="f-card-overview" class="select select-sm hidden" aria-label="Filtrar por cartão"></select>
           <button type="button" class="btn btn-sm" id="btn-speak-summary"><span data-icon="volume"></span> Ouvir
             resumo</button>
           <button type="button" class="btn btn-sm" id="btn-speak-all"><span data-icon="volume"></span> Ouvir todos os
@@ -196,6 +197,8 @@
       </section>
 
       <div id="view-content" style="display: flex; flex-direction: column; gap: 16px;"></div>
+
+      <section class="card" id="reimbursement-card"></section>
 
       <!-- Lançamentos -->
       <section class="card">
@@ -230,7 +233,8 @@
             <option value="ALL">Todas as marcações</option>
             <option value="essencial">Essencial</option>
             <option value="superfluo">Supérfluo</option>
-            <option value="reembolsavel">Reembolsável</option>
+            <option value="reembolsavel">Reembolsável (100%)</option>
+            <option value="dividido">Dividido (50%)</option>
             <option value="revisar">Revisar</option>
           </select>
           <select id="f-sort" class="select" aria-label="Ordenação">
@@ -241,6 +245,8 @@
             <option value="NAME_ASC">Nome (A–Z)</option>
           </select>
         </div>
+
+        <div id="search-spotlight" class="search-spotlight hidden"></div>
 
         <div class="table-wrap">
           <table>
@@ -275,7 +281,7 @@
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 
 </html>

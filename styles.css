@@ -1495,6 +1495,168 @@ tbody tr:hover {
   }
 }
 
+.select-sm {
+  height: 32px;
+  font-size: 13px;
+  padding: 0 10px;
+}
+
+/* ---------- Acerto de contas e reembolsos ---------- */
+.reimb-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.reimb-pill {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.reimb-pill.primary {
+  background: var(--primary-soft);
+  border-color: transparent;
+}
+
+.reimb-pill span {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.reimb-pill.primary span {
+  color: var(--primary-text);
+}
+
+.reimb-pill strong {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.reimb-pill.primary strong {
+  color: var(--primary-text);
+}
+
+.reimb-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------- Mini-relatório de busca ---------- */
+.search-spotlight {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.spotlight-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.spotlight-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spotlight-sub {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.spotlight-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.spotlight-stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.spotlight-stat span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.spotlight-stat strong {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.spotlight-months {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.month-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.month-chip strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (max-width: 860px) {
+  .reimb-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .spotlight-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .spotlight-grid {
+    grid-template-columns: 1fr;
+  }
+
+  #f-card-overview {
+    width: 100%;
+  }
+}
+
 /* ---------- Print ---------- */
 @media print {
 

@@ -31,7 +31,9 @@ const ICONS = {
   receipt: '<path d="M4 2v20l3-2 3 2 3-2 3 2 3-2 3 2V2l-3 2-3-2-3 2-3-2-3 2-3-2z"/><line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="12" y2="16"/>',
   bag: '<path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/>',
   percent: '<line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/>',
-  wallet: '<path d="M20 12V8H6a2 2 0 0 1 0-4h12v4"/><path d="M4 6v12a2 2 0 0 0 2 2h14v-4"/><path d="M18 12a2 2 0 0 0 0 4h4v-4z"/>'
+  wallet: '<path d="M20 12V8H6a2 2 0 0 1 0-4h12v4"/><path d="M4 6v12a2 2 0 0 0 2 2h14v-4"/><path d="M18 12a2 2 0 0 0 0 4h4v-4z"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'
 };
 
 function icon(name, size = 16) {
@@ -145,7 +147,13 @@ const MONTHS_LONG = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
   'outubro', 'novembro', 'dezembro'];
 
 const STORAGE_KEY = 'fc_statements_v1';
-const TAG_LABELS = { essencial: 'Essencial', superfluo: 'Supérfluo', reembolsavel: 'Reembolsável', revisar: 'Revisar' };
+const TAG_LABELS = {
+  essencial: 'Essencial',
+  superfluo: 'Supérfluo',
+  reembolsavel: 'Reembolsável (100%)',
+  dividido: 'Dividido (50%)',
+  revisar: 'Revisar'
+};
 
 
 function readJSON(key, fallback) {
@@ -155,6 +163,7 @@ function readJSON(key, fallback) {
 const state = {
   statements: [],
   activeId: null,
+  cardFilter: 'ALL',
   data: [],
   invertSigns: false,
   categoryFilter: 'ALL',
@@ -557,6 +566,50 @@ function monthGroups(data) {
 // ---------------------------------------------------------------------------
 // Renderização principal
 // ---------------------------------------------------------------------------
+function cardKey(stmt) {
+  return `${stmt.bank}__${stmt.account || ''}`;
+}
+
+function cardLabel(stmt) {
+  return `${stmt.bank}${stmt.account ? ' · ' + maskAccount(stmt.account) : ''}`;
+}
+
+function overviewStatements() {
+  if (state.cardFilter === 'ALL') return state.data;
+  const filtered = state.data.filter(d => cardKey(d.stmt) === state.cardFilter);
+  if (!filtered.length) {
+    state.cardFilter = 'ALL';
+    return state.data;
+  }
+  return filtered;
+}
+
+function populateCardOverviewFilter() {
+  const sel = document.getElementById('f-card-overview');
+  if (!sel) return;
+  const show = state.activeId === 'ALL' && state.data.length >= 2;
+  sel.classList.toggle('hidden', !show);
+  if (!show) return;
+
+  const cards = {};
+  state.data.forEach(d => {
+    const key = cardKey(d.stmt);
+    cards[key] = cards[key] || { key, label: cardLabel(d.stmt), count: 0 };
+    cards[key].count += 1;
+  });
+
+  if (state.cardFilter !== 'ALL' && !cards[state.cardFilter]) {
+    state.cardFilter = 'ALL';
+  }
+
+  const cardOptions = Object.values(cards)
+    .map(c => `<option value="${escapeHtml(c.key)}">${escapeHtml(c.label)} (${c.count} ${c.count === 1 ? 'fatura' : 'faturas'})</option>`)
+    .join('');
+
+  sel.innerHTML = `<option value="ALL">Todos os cartões (${state.data.length} faturas)</option>${cardOptions}`;
+  sel.value = state.cardFilter;
+}
+
 function render() {
   const has = state.statements.length > 0;
   document.getElementById('empty-state').classList.toggle('hidden', has);
@@ -574,8 +627,10 @@ function render() {
   document.getElementById('th-stmt').classList.toggle('hidden', state.activeId !== 'ALL');
 
   renderSidebar();
+  populateCardOverviewFilter();
   if (state.activeId === 'ALL') renderOverview();
   else renderStatement(state.data.find(d => d.stmt.id === state.activeId));
+  renderReimbursementCard();
   populateCategoryFilter();
   renderTable();
 }
@@ -957,18 +1012,19 @@ function renderBudget(value) {
 // Visão consolidada (várias faturas)
 // ---------------------------------------------------------------------------
 function renderOverview() {
-  const data = state.data;
+  const data = overviewStatements();
   const groups = monthGroups(data);
   const total = groups.reduce((s, g) => s + g.total, 0);
   const avg = total / groups.length;
   const maxG = [...groups].sort((a, b) => b.total - a.total)[0];
   const last = groups[groups.length - 1];
   const prev = groups[groups.length - 2];
-  const banks = [...new Set(data.map(d => d.stmt.bank))];
+  const banks = [...new Set(data.map(d => cardLabel(d.stmt)))];
+  const periodLabel = groups[0].label === last.label ? last.label : `${groups[0].label} a ${last.label}`;
 
   setPageHead('Visão consolidada', [
-    `${data.length} faturas`,
-    `${groups[0].label} a ${last.label}`,
+    `${data.length} ${data.length === 1 ? 'fatura' : 'faturas'}`,
+    periodLabel,
     escapeHtml(banks.join(', '))
   ]);
 
@@ -1019,7 +1075,8 @@ function renderOverview() {
 
   // Resumo
   const parts = [];
-  parts.push(`Você importou <strong>${data.length} faturas</strong>, de ${groups[0].label} a ${last.label}, que somam <strong>${fmtBRL(total)}</strong>, uma média de <strong>${fmtBRL(avg)}</strong> por mês.`);
+  const rangeTxt = groups[0].label === last.label ? `em ${last.label}` : `de ${groups[0].label} a ${last.label}`;
+  parts.push(`Você ${state.cardFilter === 'ALL' ? 'importou' : 'selecionou'} <strong>${data.length} ${data.length === 1 ? 'fatura' : 'faturas'}</strong>, ${rangeTxt}, que ${data.length === 1 ? 'soma' : 'somam'} <strong>${fmtBRL(total)}</strong>${groups.length > 1 ? `, uma média de <strong>${fmtBRL(avg)}</strong> por mês` : ''}.`);
   parts.push(`A maior fatura foi a de <strong>${maxG.label}</strong> (${fmtBRL(maxG.total)}).`);
   if (prev) {
     const diff = last.total - prev.total;
@@ -1304,12 +1361,226 @@ function renderProjectionChart(values, labels) {
 }
 
 // ---------------------------------------------------------------------------
+// Acerto de contas e reembolsos
+// ---------------------------------------------------------------------------
+function reimbursableShare(t) {
+  if (t.kind !== 'EXPENSE') return 0;
+  if (t.tag === 'reembolsavel') return t.amount;
+  if (t.tag === 'dividido') return t.amount * 0.5;
+  return 0;
+}
+
+function getReimbursementItems() {
+  return currentTransactions()
+    .filter(t => t.kind === 'EXPENSE' && (t.tag === 'reembolsavel' || t.tag === 'dividido'))
+    .sort((a, b) => b.date - a.date);
+}
+
+function copyReimbursementSummary() {
+  const items = getReimbursementItems();
+  if (!items.length) return toast('Nenhum gasto marcado para acerto de contas.', 'error');
+
+  const title = state.activeId === 'ALL'
+    ? 'Visão consolidada'
+    : monthLong(state.data.find(d => d.stmt.id === state.activeId).stmt.refDate);
+  const totalShare = items.reduce((s, t) => s + reimbursableShare(t), 0);
+
+  const lines = [
+    `*Acerto de contas — Fatura (${title})*`,
+    '',
+    ...items.map(t => {
+      const share = reimbursableShare(t);
+      const detail = t.tag === 'dividido'
+        ? `50% de ${fmtBRL(t.amount)} = *${fmtBRL(share)}*`
+        : `*${fmtBRL(share)}*`;
+      return `• ${fmtDayMonth(t.date)} - ${prettyMerchant(t.description)}: ${detail}`;
+    }),
+    '',
+    `*Total a receber: ${fmtBRL(totalShare)}*`
+  ];
+  const text = lines.join('\n');
+
+  const done = () => toast('Resumo copiado para colar no WhatsApp.');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+
+function fallbackCopy(text, onDone) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+    onDone();
+  } catch (_) {
+    toast('Não foi possível copiar automaticamente.', 'error');
+  }
+  ta.remove();
+}
+
+function renderReimbursementCard() {
+  const card = document.getElementById('reimbursement-card');
+  if (!card) return;
+
+  const items = getReimbursementItems();
+  const fullItems = items.filter(t => t.tag === 'reembolsavel');
+  const halfItems = items.filter(t => t.tag === 'dividido');
+  const fullTotal = fullItems.reduce((s, t) => s + t.amount, 0);
+  const halfGross = halfItems.reduce((s, t) => s + t.amount, 0);
+  const halfShare = halfGross * 0.5;
+  const totalShare = fullTotal + halfShare;
+
+  if (!items.length) {
+    card.innerHTML = `
+      <div class="card-head" style="margin-bottom: 0;">
+        <div>
+          <div class="card-title" style="display:flex;align-items:center;gap:8px;">${icon('users', 16)} Acerto de contas e reembolsos</div>
+          <div class="card-sub">Marque gastos na tabela abaixo como <strong>Reembolsável (100%)</strong> ou <strong>Dividido (50%)</strong> para somar o total a receber e gerar o resumo para WhatsApp.</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  card.innerHTML = `
+    <div class="card-head">
+      <div>
+        <div class="card-title" style="display:flex;align-items:center;gap:8px;">${icon('users', 16)} Acerto de contas e reembolsos</div>
+        <div class="card-sub">Soma automática dos lançamentos marcados para reembolso ou divisão</div>
+      </div>
+      <div class="reimb-actions">
+        <button type="button" class="btn btn-sm" id="btn-filter-reimb">Filtrar reembolsáveis</button>
+        <button type="button" class="btn btn-sm" id="btn-filter-split">Filtrar divididos</button>
+        <button type="button" class="btn btn-sm btn-primary" id="btn-copy-whatsapp">${icon('copy', 14)} Copiar resumo para WhatsApp</button>
+      </div>
+    </div>
+    <div class="reimb-summary">
+      <div class="reimb-pill primary">
+        <span>Total a receber</span>
+        <strong class="num">${fmtBRL(totalShare)}</strong>
+        <span>${items.length} ${items.length === 1 ? 'lançamento marcado' : 'lançamentos marcados'}</span>
+      </div>
+      <div class="reimb-pill">
+        <span>Reembolsável (100%)</span>
+        <strong class="num">${fmtBRL(fullTotal)}</strong>
+        <span>${fullItems.length} ${fullItems.length === 1 ? 'item' : 'itens'}</span>
+      </div>
+      <div class="reimb-pill">
+        <span>Dividido (50%)</span>
+        <strong class="num">${fmtBRL(halfShare)}</strong>
+        <span>50% de ${fmtBRL(halfGross)} · ${halfItems.length} ${halfItems.length === 1 ? 'item' : 'itens'}</span>
+      </div>
+    </div>
+    <div class="list">
+      ${items.slice(0, 8).map(t => {
+        const share = reimbursableShare(t);
+        const badge = t.tag === 'dividido'
+          ? `<span class="badge badge-info">50% de ${fmtBRL(t.amount)}</span>`
+          : '<span class="badge badge-success">100%</span>';
+        return `
+          <div class="list-row">
+            <div class="list-main">
+              <div class="list-title">${escapeHtml(prettyMerchant(t.description))}</div>
+              <div class="list-sub num">${fmtDate(t.date)}${state.activeId === 'ALL' ? ` · ${t.stmtLabel}` : ''} · ${badge}</div>
+            </div>
+            <div class="list-val num">${fmtBRL(share)}</div>
+          </div>`;
+      }).join('')}
+    </div>`;
+
+  document.getElementById('btn-copy-whatsapp').addEventListener('click', copyReimbursementSummary);
+  document.getElementById('btn-filter-reimb').addEventListener('click', () => {
+    const sel = document.getElementById('f-tag');
+    sel.value = sel.value === 'reembolsavel' ? 'ALL' : 'reembolsavel';
+    state.tableLimit = 100;
+    renderTable();
+  });
+  document.getElementById('btn-filter-split').addEventListener('click', () => {
+    const sel = document.getElementById('f-tag');
+    sel.value = sel.value === 'dividido' ? 'ALL' : 'dividido';
+    state.tableLimit = 100;
+    renderTable();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Tabela de lançamentos
 // ---------------------------------------------------------------------------
 function currentTransactions() {
-  if (state.activeId === 'ALL') return state.data.flatMap(d => d.txs);
+  if (state.activeId === 'ALL') return overviewStatements().flatMap(d => d.txs);
   const d = state.data.find(x => x.stmt.id === state.activeId);
   return d ? d.txs : [];
+}
+
+function renderSearchSpotlight(list) {
+  const box = document.getElementById('search-spotlight');
+  if (!box) return;
+  const rawQ = document.getElementById('f-search').value.trim();
+  if (!rawQ) {
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    return;
+  }
+
+  const expenses = list.filter(t => t.kind === 'EXPENSE');
+  const pool = expenses.length ? expenses : list;
+  const total = expenses.reduce((s, t) => s + t.amount, 0);
+  const count = expenses.length;
+  const avg = count ? total / count : 0;
+  const maxItem = pool.length ? [...pool].sort((a, b) => b.amount - a.amount)[0] : null;
+
+  const qNorm = normalizeText(rawQ);
+  const baseStatements = state.activeId === 'ALL' ? overviewStatements() : state.data;
+  const monthMap = {};
+  baseStatements.forEach(d => {
+    const matches = d.txs.filter(t => {
+      if (t.kind !== 'EXPENSE') return false;
+      const hay = normalizeText(`${t.description} ${fmtDate(t.date)} ${t.amount.toFixed(2).replace('.', ',')} ${t.amount.toFixed(2)} ${CATEGORIES[t.categoryId].name} ${t.stmtLabel}`);
+      return hay.includes(qNorm);
+    });
+    if (matches.length) {
+      const mk = monthKey(d.stmt.refDate);
+      monthMap[mk] = monthMap[mk] || { key: mk, label: monthLabel(d.stmt.refDate), total: 0, count: 0 };
+      monthMap[mk].total += matches.reduce((s, t) => s + t.amount, 0);
+      monthMap[mk].count += matches.length;
+    }
+  });
+  const monthHistory = Object.values(monthMap).sort((a, b) => a.key.localeCompare(b.key));
+
+  box.classList.remove('hidden');
+  box.innerHTML = `
+    <div class="spotlight-head">
+      <div class="spotlight-title">${icon('search', 15)} Resumo da busca: “${escapeHtml(rawQ)}”</div>
+      <div class="spotlight-sub">${count} ${count === 1 ? 'gasto encontrado' : 'gastos encontrados'} na visualização atual</div>
+    </div>
+    <div class="spotlight-grid">
+      <div class="spotlight-stat">
+        <span>Compras</span>
+        <strong class="num">${count}</strong>
+      </div>
+      <div class="spotlight-stat">
+        <span>Total gasto</span>
+        <strong class="num">${fmtBRL(total)}</strong>
+      </div>
+      <div class="spotlight-stat">
+        <span>Ticket médio</span>
+        <strong class="num">${fmtBRL(avg)}</strong>
+      </div>
+      <div class="spotlight-stat">
+        <span>Maior compra</span>
+        <strong class="num">${maxItem ? fmtBRL(maxItem.amount) : '—'}</strong>
+      </div>
+    </div>
+    ${monthHistory.length ? `
+      <div class="spotlight-months">
+        <span>Evolução nos meses:</span>
+        ${monthHistory.map(m => `<span class="month-chip num">${m.label}: <strong>${fmtBRL(m.total)}</strong> (${m.count}x)</span>`).join('')}
+      </div>` : ''}`;
 }
 
 function populateCategoryFilter() {
@@ -1356,6 +1627,7 @@ function filteredTransactions() {
 function renderTable() {
   const body = document.getElementById('tx-body');
   const list = filteredTransactions();
+  renderSearchSpotlight(list);
   const showStmt = state.activeId === 'ALL';
   const expenseSum = list.filter(t => t.kind === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
   document.getElementById('table-summary').textContent =
@@ -1419,6 +1691,7 @@ function renderTable() {
       if (e.target.value) state.customTags[id] = e.target.value; else delete state.customTags[id];
       localStorage.setItem('ofx_custom_tags', JSON.stringify(state.customTags));
       state.data.forEach(d => d.txs.forEach(t => { if (t.id === id) t.tag = e.target.value; }));
+      renderReimbursementCard();
     });
   });
 }
@@ -1476,7 +1749,7 @@ function filtersActive() {
 
 function exportFileBase() {
   if (state.activeId === 'ALL') {
-    const g = monthGroups(state.data);
+    const g = monthGroups(overviewStatements());
     return `faturas-consolidado-${g[0].key}_a_${g[g.length - 1].key}`;
   }
   const d = state.data.find(x => x.stmt.id === state.activeId);
@@ -1543,7 +1816,7 @@ async function buildWorkbook() {
   await loadScript('https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js', 'ExcelJS');
 
   const isAll = state.activeId === 'ALL';
-  const views = isAll ? state.data : [state.data.find(d => d.stmt.id === state.activeId)];
+  const views = isAll ? overviewStatements() : [state.data.find(d => d.stmt.id === state.activeId)];
   const agg = aggregateMetrics(views);
   const list = filteredTransactions();
 
@@ -1855,6 +2128,7 @@ async function handleFiles(fileList) {
   saveStatements();
   if (lastId) {
     state.activeId = added + updated > 1 && state.statements.length > 1 ? 'ALL' : lastId;
+    state.cardFilter = 'ALL';
     state.categoryFilter = 'ALL';
     state.tableLimit = 100;
   }
@@ -1896,9 +2170,17 @@ const SAMPLE_ITEMS = [
   ['20261112', -159.90, 'COBASI PET SHOP RACAO']
 ];
 
+const ITAU_SAMPLE_ITEMS = [
+  ['20261028', -180.00, 'HOTEL IBIS CORPORATIVO'],
+  ['20261102', -94.50, 'IFD*IFOOD BR - ALMOCO'],
+  ['20261106', -145.00, 'POSTO IPIRANGA COMBUSTIVEL'],
+  ['20261111', -68.90, 'DROGA RAIA FARMACIA'],
+  ['20261114', -42.00, 'UBER *TRIP']
+];
+
 function buildSampleStatements() {
   const factors = [1, 0.88, 0.94];
-  return [2, 1, 0].map(k => {
+  const nubank = [2, 1, 0].map(k => {
     const items = [];
     SAMPLE_ITEMS.forEach(([dt, amt, desc], idx) => {
       let d = desc;
@@ -1931,12 +2213,36 @@ function buildSampleStatements() {
       { isSample: true, refDate: shiftMonths(new Date(2026, 10, 22), -k) }
     );
   });
+
+  const itauItems = ITAU_SAMPLE_ITEMS.map(([dt, amt, desc], idx) => ({
+    idx,
+    fitId: `sample-itau-${idx}`,
+    trnType: 'DEBIT',
+    date: parseOfxDate(dt),
+    rawAmount: amt,
+    description: desc
+  }));
+  const itauNov = createStatement(
+    {
+      org: 'BANCO ITAU S.A.', acctId: 'exemplo-0000-4421', curDef: 'BRL',
+      startDate: new Date(2026, 9, 20), endDate: new Date(2026, 10, 18), ledgerBalance: null, items: itauItems
+    },
+    '',
+    { isSample: true, refDate: new Date(2026, 10, 24) }
+  );
+
+  return [...nubank, itauNov];
 }
 
 function loadSample() {
   state.statements = buildSampleStatements();
   state.activeId = 'ALL';
+  state.cardFilter = 'ALL';
   state.categoryFilter = 'ALL';
+  const nubankNov = state.statements[2];
+  const itauNov = state.statements[3];
+  state.customTags[`${itauNov.id}#0`] = 'reembolsavel';
+  state.customTags[`${nubankNov.id}#19`] = 'dividido';
   render();
 }
 
@@ -1955,6 +2261,7 @@ function clearAll() {
   state.customCategories = {};
   state.customTags = {};
   state.activeId = null;
+  state.cardFilter = 'ALL';
   render();
   toast('Todos os dados foram apagados deste navegador.');
 }
@@ -2010,6 +2317,11 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-speak-stop').addEventListener('click', stopSpeaking);
 
   // Filtros
+  document.getElementById('f-card-overview').addEventListener('change', e => {
+    state.cardFilter = e.target.value;
+    state.tableLimit = 100;
+    render();
+  });
   ['f-search', 'f-type', 'f-tag', 'f-sort'].forEach(id => document.getElementById(id).addEventListener('input', () => { state.tableLimit = 100; renderTable(); }));
   document.getElementById('f-category').addEventListener('input', e => setCategoryFilter(e.target.value));
   document.getElementById('btn-more-rows').addEventListener('click', () => { state.tableLimit += 100; renderTable(); });
