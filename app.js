@@ -147,6 +147,8 @@ const MONTHS_LONG = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
   'outubro', 'novembro', 'dezembro'];
 
 const STORAGE_KEY = 'fc_statements_v1';
+const PEOPLE_KEY = 'fc_people_v1';
+const ASSIGNEES_KEY = 'fc_assignees_v1';
 const TAG_LABELS = {
   essencial: 'Essencial',
   superfluo: 'Supérfluo',
@@ -167,12 +169,32 @@ const state = {
   data: [],
   invertSigns: false,
   categoryFilter: 'ALL',
+  personFilter: 'ALL',
   tableLimit: 100,
   charts: {},
   customCategories: readJSON('ofx_custom_categories', {}),
   customTags: readJSON('ofx_custom_tags', {}),
+  people: readJSON(PEOPLE_KEY, ['Eu']),
+  customAssignees: readJSON(ASSIGNEES_KEY, {}),
   budgetLimit: Number(localStorage.getItem('ofx_budget_limit') || 3000)
 };
+
+function ensurePeopleList() {
+  const seen = new Set(['eu']);
+  const out = ['Eu'];
+  const raw = Array.isArray(state.people) ? state.people : [];
+  raw.forEach(item => {
+    const clean = String(item || '').trim();
+    if (!clean) return;
+    const key = normalizeText(clean);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(clean);
+  });
+  state.people = out;
+  return out;
+}
+ensurePeopleList();
 
 
 const BRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -632,6 +654,7 @@ function render() {
   else renderStatement(state.data.find(d => d.stmt.id === state.activeId));
   renderReimbursementCard();
   populateCategoryFilter();
+  populatePersonFilter();
   renderTable();
 }
 
@@ -1361,8 +1384,163 @@ function renderProjectionChart(values, labels) {
 }
 
 // ---------------------------------------------------------------------------
-// Acerto de contas e reembolsos
+// Pessoas que usam o cartão, divisão por compra e acerto de contas
 // ---------------------------------------------------------------------------
+function savePeople() {
+  try { localStorage.setItem(PEOPLE_KEY, JSON.stringify(ensurePeopleList())); } catch (_) {}
+}
+
+function saveAssignees() {
+  try { localStorage.setItem(ASSIGNEES_KEY, JSON.stringify(state.customAssignees)); } catch (_) {}
+}
+
+function addPerson(rawInput) {
+  ensurePeopleList();
+  const names = String(rawInput || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!names.length) return;
+  let added = 0;
+  names.forEach(name => {
+    const exists = state.people.some(p => normalizeText(p) === normalizeText(name));
+    if (!exists) {
+      state.people.push(name);
+      added++;
+    }
+  });
+  if (!added) {
+    toast('Essa pessoa já está na lista.', 'error');
+    return;
+  }
+  savePeople();
+  populatePersonFilter();
+  renderReimbursementCard();
+  renderTable();
+  toast(added === 1 ? `${names[0]} adicionado(a) ao cartão.` : `${added} pessoas adicionadas ao cartão.`);
+}
+
+function removePerson(name) {
+  if (normalizeText(name) === 'eu') return;
+  if (!confirm(`Remover "${name}" da lista do cartão? As compras atribuídas somente a essa pessoa voltarão para "Eu".`)) return;
+  state.people = state.people.filter(p => p !== name);
+  ensurePeopleList();
+
+  Object.keys(state.customAssignees).forEach(txId => {
+    const entry = state.customAssignees[txId];
+    if (!entry || !Array.isArray(entry.people)) return;
+    if (!entry.people.includes(name)) return;
+    const remaining = entry.people.filter(p => p !== name);
+    const nextPeople = remaining.length ? remaining : ['Eu'];
+    const nextCount = Math.max(nextPeople.length, remaining.length ? (entry.splitCount || nextPeople.length) : 1);
+    if (nextPeople.length === 1 && nextPeople[0] === 'Eu' && nextCount === 1) {
+      delete state.customAssignees[txId];
+    } else {
+      state.customAssignees[txId] = { people: nextPeople, splitCount: nextCount };
+    }
+  });
+
+  if (state.personFilter === name) state.personFilter = 'ALL';
+  savePeople();
+  saveAssignees();
+  populatePersonFilter();
+  renderReimbursementCard();
+  renderTable();
+  toast(`${name} removido(a).`);
+}
+
+function getTxSplit(t) {
+  if (!t || t.kind !== 'EXPENSE') return { people: [], splitCount: 1, perPersonAmount: 0 };
+  const raw = state.customAssignees[t.id];
+  const rawPeople = raw && Array.isArray(raw.people)
+    ? raw.people.map(p => String(p || '').trim()).filter(Boolean)
+    : [];
+  const people = rawPeople.length ? rawPeople : ['Eu'];
+  const splitCount = Math.max(people.length, parseInt(raw?.splitCount, 10) || people.length, 1);
+  return {
+    people,
+    splitCount,
+    perPersonAmount: t.amount / splitCount
+  };
+}
+
+function setTxSplit(txId, people, splitCount, { skipTableRender = false } = {}) {
+  const cleanPeople = [];
+  const seen = new Set();
+  (people || []).forEach(p => {
+    const clean = String(p || '').trim();
+    if (!clean) return;
+    const key = normalizeText(clean);
+    if (!seen.has(key)) {
+      seen.add(key);
+      cleanPeople.push(clean);
+    }
+  });
+  const finalPeople = cleanPeople.length ? cleanPeople : ['Eu'];
+  const finalCount = Math.max(finalPeople.length, parseInt(splitCount, 10) || finalPeople.length, 1);
+
+  if (finalPeople.length === 1 && normalizeText(finalPeople[0]) === 'eu' && finalCount === 1) {
+    delete state.customAssignees[txId];
+  } else {
+    state.customAssignees[txId] = { people: finalPeople, splitCount: finalCount };
+  }
+  saveAssignees();
+  renderReimbursementCard();
+  if (!skipTableRender) renderTable();
+}
+
+function computePeopleBreakdown(txList = currentTransactions()) {
+  ensurePeopleList();
+  const expenses = txList.filter(t => t.kind === 'EXPENSE');
+  const map = {};
+  const ensureBucket = (name, isManualExtra = false) => {
+    if (!map[name]) {
+      map[name] = {
+        name,
+        isManualExtra,
+        exclusiveCount: 0,
+        sharedCount: 0,
+        totalCount: 0,
+        totalAmount: 0,
+        pct: 0,
+        items: []
+      };
+    }
+    return map[name];
+  };
+
+  state.people.forEach(p => ensureBucket(p));
+
+  let totalExpenses = 0;
+  expenses.forEach(t => {
+    totalExpenses += t.amount;
+    const split = getTxSplit(t);
+    const isShared = split.splitCount > 1;
+
+    split.people.forEach(pName => {
+      const bucket = ensureBucket(pName);
+      if (isShared) bucket.sharedCount += 1;
+      else bucket.exclusiveCount += 1;
+      bucket.totalCount += 1;
+      bucket.totalAmount += split.perPersonAmount;
+      bucket.items.push({ tx: t, share: split.perPersonAmount, split, extraShares: 1 });
+    });
+
+    if (split.splitCount > split.people.length) {
+      const extraShares = split.splitCount - split.people.length;
+      const bucket = ensureBucket('Outras pessoas (divisão manual)', true);
+      bucket.sharedCount += 1;
+      bucket.totalCount += 1;
+      bucket.totalAmount += split.perPersonAmount * extraShares;
+      bucket.items.push({ tx: t, share: split.perPersonAmount * extraShares, split, extraShares });
+    }
+  });
+
+  const rows = Object.values(map).map(p => ({
+    ...p,
+    pct: totalExpenses > 0 ? (p.totalAmount / totalExpenses) * 100 : 0
+  }));
+
+  return { rows, totalExpenses };
+}
+
 function reimbursableShare(t) {
   if (t.kind !== 'EXPENSE') return 0;
   if (t.tag === 'reembolsavel') return t.amount;
@@ -1376,36 +1554,73 @@ function getReimbursementItems() {
     .sort((a, b) => b.date - a.date);
 }
 
-function copyReimbursementSummary() {
-  const items = getReimbursementItems();
-  if (!items.length) return toast('Nenhum gasto marcado para acerto de contas.', 'error');
-
-  const title = state.activeId === 'ALL'
-    ? 'Visão consolidada'
-    : monthLong(state.data.find(d => d.stmt.id === state.activeId).stmt.refDate);
-  const totalShare = items.reduce((s, t) => s + reimbursableShare(t), 0);
-
-  const lines = [
-    `*Acerto de contas — Fatura (${title})*`,
-    '',
-    ...items.map(t => {
-      const share = reimbursableShare(t);
-      const detail = t.tag === 'dividido'
-        ? `50% de ${fmtBRL(t.amount)} = *${fmtBRL(share)}*`
-        : `*${fmtBRL(share)}*`;
-      return `• ${fmtDayMonth(t.date)} - ${prettyMerchant(t.description)}: ${detail}`;
-    }),
-    '',
-    `*Total a receber: ${fmtBRL(totalShare)}*`
-  ];
-  const text = lines.join('\n');
-
-  const done = () => toast('Resumo copiado para colar no WhatsApp.');
+function copyTextWithToast(text, msg = 'Resumo copiado para colar no WhatsApp.') {
+  const done = () => toast(msg);
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
   } else {
     fallbackCopy(text, done);
   }
+}
+
+function activeViewTitle() {
+  if (state.activeId === 'ALL') return 'Visão consolidada';
+  const d = state.data.find(x => x.stmt.id === state.activeId);
+  return d ? monthLong(d.stmt.refDate) : 'Fatura';
+}
+
+function copyPersonSummaryWhatsApp(personName) {
+  const breakdown = computePeopleBreakdown();
+  const row = breakdown.rows.find(r => r.name === personName);
+  if (!row || !row.items.length) return toast(`Nenhum gasto atribuído para ${personName}.`, 'error');
+
+  const sorted = [...row.items].sort((a, b) => b.tx.date - a.tx.date);
+  const lines = [
+    `*Gastos de ${personName} — Fatura (${activeViewTitle()})*`,
+    '',
+    ...sorted.map(({ tx, share, split }) => {
+      const partInfo = split.splitCount > 1
+        ? ` (÷ ${split.splitCount} de ${fmtBRL(tx.amount)}) = *${fmtBRL(share)}*`
+        : `: *${fmtBRL(share)}*`;
+      return `• ${fmtDayMonth(tx.date)} - ${prettyMerchant(tx.description)}${partInfo}`;
+    }),
+    '',
+    `*Total de ${personName}: ${fmtBRL(row.totalAmount)}*`
+  ];
+  copyTextWithToast(lines.join('\n'), `Resumo de ${personName} copiado para o WhatsApp!`);
+}
+
+function copyPeopleSummaryWhatsApp() {
+  const breakdown = computePeopleBreakdown();
+  const nonZero = breakdown.rows.filter(r => r.totalCount > 0);
+  const reimbItems = getReimbursementItems();
+  if (!nonZero.length && !reimbItems.length) {
+    return toast('Nenhum gasto disponível para copiar.', 'error');
+  }
+
+  const lines = [`*Resumo do Cartão — ${activeViewTitle()}*`, ''];
+  if (nonZero.length) {
+    lines.push('*Total por pessoa:*');
+    nonZero.forEach(p => {
+      lines.push(`• *${p.name}:* ${fmtBRL(p.totalAmount)} (${p.totalCount} ${p.totalCount === 1 ? 'compra' : 'compras'} · ${fmtPct(p.pct)})`);
+    });
+    lines.push(`• *Total dos gastos:* ${fmtBRL(breakdown.totalExpenses)}`);
+  }
+
+  if (reimbItems.length) {
+    const totalShare = reimbItems.reduce((s, t) => s + reimbursableShare(t), 0);
+    lines.push('', '*Itens marcados como reembolsáveis / 50%:*');
+    reimbItems.forEach(t => {
+      const share = reimbursableShare(t);
+      const detail = t.tag === 'dividido'
+        ? `50% de ${fmtBRL(t.amount)} = *${fmtBRL(share)}*`
+        : `*${fmtBRL(share)}*`;
+      lines.push(`• ${fmtDayMonth(t.date)} - ${prettyMerchant(t.description)}: ${detail}`);
+    });
+    lines.push(`*Total reembolsável: ${fmtBRL(totalShare)}*`);
+  }
+
+  copyTextWithToast(lines.join('\n'));
 }
 
 function fallbackCopy(text, onDone) {
@@ -1427,85 +1642,171 @@ function fallbackCopy(text, onDone) {
 function renderReimbursementCard() {
   const card = document.getElementById('reimbursement-card');
   if (!card) return;
+  ensurePeopleList();
 
-  const items = getReimbursementItems();
-  const fullItems = items.filter(t => t.tag === 'reembolsavel');
-  const halfItems = items.filter(t => t.tag === 'dividido');
+  const breakdown = computePeopleBreakdown();
+  const reimbItems = getReimbursementItems();
+  const fullItems = reimbItems.filter(t => t.tag === 'reembolsavel');
+  const halfItems = reimbItems.filter(t => t.tag === 'dividido');
   const fullTotal = fullItems.reduce((s, t) => s + t.amount, 0);
   const halfGross = halfItems.reduce((s, t) => s + t.amount, 0);
   const halfShare = halfGross * 0.5;
   const totalShare = fullTotal + halfShare;
 
-  if (!items.length) {
-    card.innerHTML = `
-      <div class="card-head" style="margin-bottom: 0;">
-        <div>
-          <div class="card-title" style="display:flex;align-items:center;gap:8px;">${icon('users', 16)} Acerto de contas e reembolsos</div>
-          <div class="card-sub">Marque gastos na tabela abaixo como <strong>Reembolsável (100%)</strong> ou <strong>Dividido (50%)</strong> para somar o total a receber e gerar o resumo para WhatsApp.</div>
+  const peopleBadges = state.people.map(p => {
+    const isMe = normalizeText(p) === 'eu';
+    return `
+      <span class="person-badge ${isMe ? 'is-me' : ''}">
+        <span>${escapeHtml(p)}</span>
+        ${isMe ? '' : `<button type="button" class="person-badge-del" data-del-person="${escapeHtml(p)}" title="Remover ${escapeHtml(p)}" aria-label="Remover ${escapeHtml(p)}">${icon('x', 12)}</button>`}
+      </span>`;
+  }).join('');
+
+  const personRowsHtml = breakdown.rows.map(p => `
+    <tr>
+      <td><strong>${escapeHtml(p.name)}</strong></td>
+      <td class="num" style="text-align:right;">${p.exclusiveCount}</td>
+      <td class="num" style="text-align:right;">${p.sharedCount}</td>
+      <td class="num" style="text-align:right;">${p.totalCount}</td>
+      <td class="num" style="text-align:right;"><strong>${fmtBRL(p.totalAmount)}</strong></td>
+      <td class="num" style="text-align:right;">${fmtPct(p.pct)}</td>
+      <td style="text-align:right;white-space:nowrap;">
+        <div class="person-row-actions">
+          ${p.isManualExtra ? '' : `<button type="button" class="btn btn-sm btn-ghost" data-filter-person="${escapeHtml(p.name)}">${state.personFilter === p.name ? 'Limpar filtro' : 'Filtrar'}</button>`}
+          ${p.totalCount > 0 ? `<button type="button" class="btn btn-sm" data-copy-person="${escapeHtml(p.name)}" title="Copiar resumo de ${escapeHtml(p.name)} para WhatsApp">${icon('copy', 13)} WhatsApp</button>` : ''}
         </div>
-      </div>`;
-    return;
-  }
+      </td>
+    </tr>`).join('');
+
+  const reimbSectionHtml = reimbItems.length ? `
+    <div style="margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);">
+      <div class="card-head" style="margin-bottom: 10px;">
+        <div>
+          <div class="card-title" style="font-size: 14px;">Itens marcados como Reembolsável / Dividido (50%)</div>
+          <div class="card-sub">Resumo rápido pelas marcações da tabela</div>
+        </div>
+        <div class="reimb-actions">
+          <button type="button" class="btn btn-sm" id="btn-filter-reimb">Filtrar reembolsáveis</button>
+          <button type="button" class="btn btn-sm" id="btn-filter-split">Filtrar divididos (50%)</button>
+        </div>
+      </div>
+      <div class="reimb-summary" style="margin-bottom: 0;">
+        <div class="reimb-pill primary">
+          <span>Total reembolsável</span>
+          <strong class="num">${fmtBRL(totalShare)}</strong>
+          <span>${reimbItems.length} ${reimbItems.length === 1 ? 'lançamento marcado' : 'lançamentos marcados'}</span>
+        </div>
+        <div class="reimb-pill">
+          <span>Reembolsável (100%)</span>
+          <strong class="num">${fmtBRL(fullTotal)}</strong>
+          <span>${fullItems.length} ${fullItems.length === 1 ? 'item' : 'itens'}</span>
+        </div>
+        <div class="reimb-pill">
+          <span>Dividido (50%)</span>
+          <strong class="num">${fmtBRL(halfShare)}</strong>
+          <span>50% de ${fmtBRL(halfGross)} · ${halfItems.length} ${halfItems.length === 1 ? 'item' : 'itens'}</span>
+        </div>
+      </div>
+    </div>` : '';
 
   card.innerHTML = `
     <div class="card-head">
       <div>
-        <div class="card-title" style="display:flex;align-items:center;gap:8px;">${icon('users', 16)} Acerto de contas e reembolsos</div>
-        <div class="card-sub">Soma automática dos lançamentos marcados para reembolso ou divisão</div>
+        <div class="card-title" style="display:flex;align-items:center;gap:8px;">${icon('users', 16)} Gastos por pessoa e divisão do cartão</div>
+        <div class="card-sub">Cadastre quem usa o cartão, clique nos nomes em cada compra abaixo para atribuir ou dividir (ex: ÷ 3) e acompanhe o total de cada pessoa.</div>
       </div>
       <div class="reimb-actions">
-        <button type="button" class="btn btn-sm" id="btn-filter-reimb">Filtrar reembolsáveis</button>
-        <button type="button" class="btn btn-sm" id="btn-filter-split">Filtrar divididos</button>
-        <button type="button" class="btn btn-sm btn-primary" id="btn-copy-whatsapp">${icon('copy', 14)} Copiar resumo para WhatsApp</button>
+        <button type="button" class="btn btn-sm btn-primary" id="btn-copy-whatsapp">${icon('copy', 14)} Copiar resumo geral (WhatsApp)</button>
       </div>
     </div>
-    <div class="reimb-summary">
-      <div class="reimb-pill primary">
-        <span>Total a receber</span>
-        <strong class="num">${fmtBRL(totalShare)}</strong>
-        <span>${items.length} ${items.length === 1 ? 'lançamento marcado' : 'lançamentos marcados'}</span>
-      </div>
-      <div class="reimb-pill">
-        <span>Reembolsável (100%)</span>
-        <strong class="num">${fmtBRL(fullTotal)}</strong>
-        <span>${fullItems.length} ${fullItems.length === 1 ? 'item' : 'itens'}</span>
-      </div>
-      <div class="reimb-pill">
-        <span>Dividido (50%)</span>
-        <strong class="num">${fmtBRL(halfShare)}</strong>
-        <span>50% de ${fmtBRL(halfGross)} · ${halfItems.length} ${halfItems.length === 1 ? 'item' : 'itens'}</span>
-      </div>
-    </div>
-    <div class="list">
-      ${items.slice(0, 8).map(t => {
-        const share = reimbursableShare(t);
-        const badge = t.tag === 'dividido'
-          ? `<span class="badge badge-info">50% de ${fmtBRL(t.amount)}</span>`
-          : '<span class="badge badge-success">100%</span>';
-        return `
-          <div class="list-row">
-            <div class="list-main">
-              <div class="list-title">${escapeHtml(prettyMerchant(t.description))}</div>
-              <div class="list-sub num">${fmtDate(t.date)}${state.activeId === 'ALL' ? ` · ${t.stmtLabel}` : ''} · ${badge}</div>
-            </div>
-            <div class="list-val num">${fmtBRL(share)}</div>
-          </div>`;
-      }).join('')}
-    </div>`;
 
-  document.getElementById('btn-copy-whatsapp').addEventListener('click', copyReimbursementSummary);
-  document.getElementById('btn-filter-reimb').addEventListener('click', () => {
-    const sel = document.getElementById('f-tag');
-    sel.value = sel.value === 'reembolsavel' ? 'ALL' : 'reembolsavel';
-    state.tableLimit = 100;
-    renderTable();
+    <div class="people-bar">
+      <div class="people-chips">
+        <span class="people-bar-label">Pessoas no cartão:</span>
+        ${peopleBadges}
+      </div>
+      <form class="people-add-form" id="form-add-person">
+        <input type="text" id="input-new-person" class="input" placeholder="Adicionar nome (ex: Anna)" maxlength="40" aria-label="Nome da pessoa que usa o cartão" />
+        <button type="submit" class="btn btn-sm btn-primary">${icon('plus', 14)} Adicionar</button>
+      </form>
+    </div>
+
+    <div class="table-wrap person-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Pessoa</th>
+            <th style="text-align:right;">Individuais</th>
+            <th style="text-align:right;">Divididas</th>
+            <th style="text-align:right;">Total de compras</th>
+            <th style="text-align:right;">Valor da parte</th>
+            <th style="text-align:right;">% dos gastos</th>
+            <th style="text-align:right;">Ações</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${personRowsHtml}
+        </tbody>
+        <tfoot>
+          <tr style="background: var(--surface-2); font-weight: 600;">
+            <td>Total dos gastos</td>
+            <td colspan="3"></td>
+            <td class="num" style="text-align:right;">${fmtBRL(breakdown.totalExpenses)}</td>
+            <td class="num" style="text-align:right;">100,0%</td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    ${reimbSectionHtml}`;
+
+  document.getElementById('form-add-person').addEventListener('submit', e => {
+    e.preventDefault();
+    const input = document.getElementById('input-new-person');
+    addPerson(input.value);
+    input.value = '';
   });
-  document.getElementById('btn-filter-split').addEventListener('click', () => {
-    const sel = document.getElementById('f-tag');
-    sel.value = sel.value === 'dividido' ? 'ALL' : 'dividido';
-    state.tableLimit = 100;
-    renderTable();
+
+  card.querySelectorAll('[data-del-person]').forEach(btn => {
+    btn.addEventListener('click', () => removePerson(btn.getAttribute('data-del-person')));
   });
+
+  card.querySelectorAll('[data-filter-person]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const name = btn.getAttribute('data-filter-person');
+      state.personFilter = state.personFilter === name ? 'ALL' : name;
+      const sel = document.getElementById('f-person');
+      if (sel) sel.value = state.personFilter;
+      state.tableLimit = 100;
+      renderReimbursementCard();
+      renderTable();
+    });
+  });
+
+  card.querySelectorAll('[data-copy-person]').forEach(btn => {
+    btn.addEventListener('click', () => copyPersonSummaryWhatsApp(btn.getAttribute('data-copy-person')));
+  });
+
+  document.getElementById('btn-copy-whatsapp').addEventListener('click', copyPeopleSummaryWhatsApp);
+
+  const btnReimb = document.getElementById('btn-filter-reimb');
+  if (btnReimb) {
+    btnReimb.addEventListener('click', () => {
+      const sel = document.getElementById('f-tag');
+      sel.value = sel.value === 'reembolsavel' ? 'ALL' : 'reembolsavel';
+      state.tableLimit = 100;
+      renderTable();
+    });
+  }
+  const btnSplit = document.getElementById('btn-filter-split');
+  if (btnSplit) {
+    btnSplit.addEventListener('click', () => {
+      const sel = document.getElementById('f-tag');
+      sel.value = sel.value === 'dividido' ? 'ALL' : 'dividido';
+      state.tableLimit = 100;
+      renderTable();
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1590,15 +1891,33 @@ function populateCategoryFilter() {
   sel.value = state.categoryFilter;
 }
 
+function populatePersonFilter() {
+  const sel = document.getElementById('f-person');
+  if (!sel) return;
+  ensurePeopleList();
+  sel.innerHTML = [
+    '<option value="ALL">Todas as pessoas</option>',
+    ...state.people.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`),
+    '<option value="SHARED">Somente divididas (2+ pessoas)</option>'
+  ].join('');
+  if (state.personFilter !== 'ALL' && state.personFilter !== 'SHARED' && !state.people.includes(state.personFilter)) {
+    state.personFilter = 'ALL';
+  }
+  sel.value = state.personFilter;
+}
+
 function filteredTransactions() {
   const q = normalizeText(document.getElementById('f-search').value);
   const cat = document.getElementById('f-category').value;
+  const person = document.getElementById('f-person') ? document.getElementById('f-person').value : 'ALL';
   const type = document.getElementById('f-type').value;
   const tag = document.getElementById('f-tag').value;
   const sort = document.getElementById('f-sort').value;
 
   const list = currentTransactions().filter(t => {
     if (cat !== 'ALL' && (t.kind !== 'EXPENSE' || t.categoryId !== cat)) return false;
+    if (person === 'SHARED' && (t.kind !== 'EXPENSE' || getTxSplit(t).splitCount <= 1)) return false;
+    if (person !== 'ALL' && person !== 'SHARED' && (t.kind !== 'EXPENSE' || !getTxSplit(t).people.includes(person))) return false;
     if (type === 'EXPENSE' && t.kind !== 'EXPENSE') return false;
     if (type === 'PURCHASE' && !t.isPurchase) return false;
     if (type === 'INSTALLMENT' && !t.installment) return false;
@@ -1608,7 +1927,8 @@ function filteredTransactions() {
     if (['REFUND', 'PAYMENT', 'CARRYOVER'].includes(type) && t.kind !== type) return false;
     if (tag !== 'ALL' && t.tag !== tag) return false;
     if (q) {
-      const hay = normalizeText(`${t.description} ${fmtDate(t.date)} ${t.amount.toFixed(2).replace('.', ',')} ${t.amount.toFixed(2)} ${CATEGORIES[t.categoryId].name} ${t.stmtLabel}`);
+      const split = getTxSplit(t);
+      const hay = normalizeText(`${t.description} ${fmtDate(t.date)} ${t.amount.toFixed(2).replace('.', ',')} ${t.amount.toFixed(2)} ${CATEGORIES[t.categoryId].name} ${t.stmtLabel} ${split.people.join(' ')}`);
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -1628,19 +1948,22 @@ function renderTable() {
   const body = document.getElementById('tx-body');
   const list = filteredTransactions();
   renderSearchSpotlight(list);
+  ensurePeopleList();
   const showStmt = state.activeId === 'ALL';
   const expenseSum = list.filter(t => t.kind === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
   document.getElementById('table-summary').textContent =
     `${list.length} ${list.length === 1 ? 'lançamento' : 'lançamentos'} · gastos ${fmtBRL(expenseSum)}`;
 
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="${showStmt ? 6 : 5}" style="text-align:center;padding:32px;color:var(--muted)">Nenhum lançamento encontrado com os filtros atuais.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="${showStmt ? 7 : 6}" style="text-align:center;padding:32px;color:var(--muted)">Nenhum lançamento encontrado com os filtros atuais.</td></tr>`;
     document.getElementById('table-foot').classList.add('hidden');
     return;
   }
 
   const catOptions = Object.values(CATEGORIES).map(c => `<option value="${c.id}">${c.name}</option>`).join('');
   const visible = list.slice(0, state.tableLimit);
+  const txMap = {};
+  visible.forEach(t => { txMap[t.id] = t; });
 
   body.innerHTML = visible.map(t => {
     const badges = [];
@@ -1659,6 +1982,26 @@ function renderTable() {
     const tagOptions = `<option value="">—</option>` + Object.entries(TAG_LABELS)
       .map(([k, v]) => `<option value="${k}" ${t.tag === k ? 'selected' : ''}>${v}</option>`).join('');
 
+    let personCell = '<span class="cat-tag" style="color:var(--muted)">—</span>';
+    if (t.kind === 'EXPENSE') {
+      const split = getTxSplit(t);
+      const chips = state.people.map(p => {
+        const active = split.people.includes(p);
+        return `<button type="button" class="person-chip ${active ? 'active' : ''}" data-tx-person="${escapeHtml(t.id)}" data-person-name="${escapeHtml(p)}" aria-pressed="${active}">${escapeHtml(p)}</button>`;
+      }).join('');
+      personCell = `
+        <div class="tx-split-cell">
+          <div class="tx-person-row">
+            <div class="tx-person-chips">${chips}</div>
+            <label class="split-count-wrap" title="Em quantas pessoas esta compra foi dividida">
+              <span>÷</span>
+              <input type="number" class="split-count-input num" min="1" max="50" value="${split.splitCount}" data-split-count="${escapeHtml(t.id)}" aria-label="Em quantas pessoas dividir" />
+            </label>
+          </div>
+          ${split.splitCount > 1 ? `<div class="split-meta num">÷ ${split.splitCount} · ${fmtBRL(split.perPersonAmount)} cada</div>` : ''}
+        </div>`;
+    }
+
     return `
       <tr class="${t.kind === 'PAYMENT' || t.kind === 'CARRYOVER' ? 'row-muted' : ''}">
         <td class="td-date num">${fmtDate(t.date)}</td>
@@ -1667,6 +2010,7 @@ function renderTable() {
           ${badges.length ? `<div class="desc-badges">${badges.join('')}</div>` : ''}
         </td>
         <td>${catCell}</td>
+        <td>${personCell}</td>
         ${showStmt ? `<td class="td-date">${t.stmtLabel}</td>` : ''}
         <td><select class="cell-select" data-tag="${escapeHtml(t.id)}" aria-label="Marcação">${tagOptions}</select></td>
         <td class="td-amount num ${amountCls}">${sign}${fmtBRL(t.amount)}</td>
@@ -1685,6 +2029,57 @@ function renderTable() {
       toast('Categoria atualizada para este estabelecimento.');
     });
   });
+
+  body.querySelectorAll('[data-tx-person]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const txId = btn.getAttribute('data-tx-person');
+      const personName = btn.getAttribute('data-person-name');
+      const tx = txMap[txId];
+      if (!tx) return;
+      const split = getTxSplit(tx);
+      let nextPeople;
+      if (split.people.includes(personName)) {
+        nextPeople = split.people.filter(p => p !== personName);
+      } else {
+        const set = new Set([...split.people, personName]);
+        nextPeople = state.people.filter(p => set.has(p));
+        set.forEach(p => { if (!nextPeople.includes(p)) nextPeople.push(p); });
+      }
+      if (!nextPeople.length) nextPeople = ['Eu'];
+      setTxSplit(txId, nextPeople, nextPeople.length);
+    });
+  });
+
+  body.querySelectorAll('[data-split-count]').forEach(input => {
+    const updateSplitInput = (finalize) => {
+      const txId = input.getAttribute('data-split-count');
+      const tx = txMap[txId];
+      if (!tx) return;
+      const rawNum = parseInt(input.value, 10);
+      if (!finalize && (isNaN(rawNum) || rawNum < 1)) return;
+      const count = Math.max(1, Math.min(50, isNaN(rawNum) ? 1 : rawNum));
+      const split = getTxSplit(tx);
+      const nextPeople = count < split.people.length ? split.people.slice(0, count) : split.people;
+      setTxSplit(txId, nextPeople, count, { skipTableRender: !finalize });
+      if (!finalize) {
+        const cell = input.closest('.tx-split-cell');
+        let meta = cell.querySelector('.split-meta');
+        if (count > 1) {
+          if (!meta) {
+            meta = document.createElement('div');
+            meta.className = 'split-meta num';
+            cell.appendChild(meta);
+          }
+          meta.textContent = `÷ ${count} · ${fmtBRL(tx.amount / count)} cada`;
+        } else if (meta) {
+          meta.remove();
+        }
+      }
+    };
+    input.addEventListener('input', () => updateSplitInput(false));
+    input.addEventListener('change', () => updateSplitInput(true));
+  });
+
   body.querySelectorAll('[data-tag]').forEach(sel => {
     sel.addEventListener('change', e => {
       const id = e.target.getAttribute('data-tag');
@@ -1744,7 +2139,10 @@ const installmentText = t => (t.installment ? `${t.installment.current} de ${t.i
 
 function filtersActive() {
   return document.getElementById('f-search').value.trim() !== '' ||
-    ['f-category', 'f-type', 'f-tag'].some(id => document.getElementById(id).value !== 'ALL');
+    ['f-category', 'f-person', 'f-type', 'f-tag'].some(id => {
+      const el = document.getElementById(id);
+      return el && el.value !== 'ALL';
+    });
 }
 
 function exportFileBase() {
@@ -1771,16 +2169,28 @@ function exportCSV() {
   if (!list.length) return toast('Nada para exportar com os filtros atuais.', 'error');
   const q = s => `"${String(s).replace(/"/g, '""')}"`;
   const money = v => v.toFixed(2).replace('.', ',');
-  const header = ['Fatura', 'Data', 'Descrição', 'Categoria', 'Tipo', 'Parcela', 'Assinatura', 'Marcação', 'Valor (R$)', 'Entra no total'];
-  const rows = list.map(t => [
-    t.stmtLabel, fmtDate(t.date), q(t.description),
-    t.kind === 'EXPENSE' ? q(CATEGORIES[t.categoryId].name) : '',
-    KIND_LABEL[t.kind], installmentText(t), t.isSubscription ? 'Sim' : 'Não', TAG_LABELS[t.tag] || '',
-    money(signedForInvoice(t)), countsInTotal(t) ? 'Sim' : 'Não'
-  ].join(';'));
+  const header = [
+    'Fatura', 'Data', 'Descrição', 'Categoria', 'Tipo',
+    'Pessoas', 'Dividido em', 'Valor por pessoa (R$)',
+    'Parcela', 'Assinatura', 'Marcação', 'Valor (R$)', 'Entra no total'
+  ];
+  const rows = list.map(t => {
+    const split = getTxSplit(t);
+    const isExp = t.kind === 'EXPENSE';
+    return [
+      t.stmtLabel, fmtDate(t.date), q(t.description),
+      isExp ? q(CATEGORIES[t.categoryId].name) : '',
+      KIND_LABEL[t.kind],
+      isExp ? q(split.people.join(', ')) : '',
+      isExp ? split.splitCount : '',
+      isExp ? money(split.perPersonAmount) : '',
+      installmentText(t), t.isSubscription ? 'Sim' : 'Não', TAG_LABELS[t.tag] || '',
+      money(signedForInvoice(t)), countsInTotal(t) ? 'Sim' : 'Não'
+    ].join(';');
+  });
   const total = list.filter(countsInTotal).reduce((s, t) => s + signedForInvoice(t), 0);
   rows.push('');
-  rows.push([q('TOTAL (gastos − estornos)'), '', '', '', '', '', '', '', money(total), ''].join(';'));
+  rows.push([q('TOTAL (gastos − estornos)'), '', '', '', '', '', '', '', '', '', '', money(total), ''].join(';'));
   download(new Blob(['\uFEFF' + [header.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8;' }), `${exportFileBase()}.csv`);
 }
 
@@ -1943,6 +2353,57 @@ async function buildWorkbook() {
   }
   void catHeader;
 
+  // Gastos por pessoa no cartão
+  const peopleResumo = computePeopleBreakdown(views.flatMap(v => v.txs));
+  if (peopleResumo.rows.length) {
+    r += 1;
+    section('Gastos por pessoa no cartão');
+    ['Pessoa', 'Individuais', 'Divididas', 'Total de compras', 'Valor da parte (R$)', '% dos gastos'].forEach((h, i) => {
+      const c = rs.getRow(r).getCell(i + 1);
+      c.value = h;
+      c.font = font({ bold: true, color: { argb: C.navyText } });
+      c.fill = fill(C.navy);
+      c.alignment = { horizontal: i === 0 ? 'left' : 'right' };
+      c.border = box;
+    });
+    r += 1;
+    const pStart = r;
+    const pEnd = r + peopleResumo.rows.length - 1;
+    const pTotalRow = pEnd + 1;
+    const pSum = peopleResumo.totalExpenses;
+    peopleResumo.rows.forEach((p, i) => {
+      const row = rs.getRow(r);
+      row.values = [
+        p.name, p.exclusiveCount, p.sharedCount, p.totalCount,
+        +p.totalAmount.toFixed(2),
+        { formula: `E${r}/E$${pTotalRow}`, result: pSum ? p.totalAmount / pSum : 0 }
+      ];
+      row.getCell(5).numFmt = MONEY;
+      row.getCell(6).numFmt = '0.0%';
+      for (let k = 1; k <= 6; k++) {
+        row.getCell(k).border = box;
+        row.getCell(k).font = font();
+        if (i % 2 === 1) row.getCell(k).fill = fill(C.zebra);
+      }
+      r += 1;
+    });
+    const row = rs.getRow(r);
+    row.getCell(1).value = 'Total';
+    row.getCell(2).value = { formula: `SUM(B${pStart}:B${pEnd})`, result: peopleResumo.rows.reduce((s, p) => s + p.exclusiveCount, 0) };
+    row.getCell(3).value = { formula: `SUM(C${pStart}:C${pEnd})`, result: peopleResumo.rows.reduce((s, p) => s + p.sharedCount, 0) };
+    row.getCell(4).value = { formula: `SUM(D${pStart}:D${pEnd})`, result: peopleResumo.rows.reduce((s, p) => s + p.totalCount, 0) };
+    row.getCell(5).value = { formula: `SUM(E${pStart}:E${pEnd})`, result: pSum };
+    row.getCell(5).numFmt = MONEY;
+    row.getCell(6).value = { formula: `SUM(F${pStart}:F${pEnd})`, result: pSum ? 1 : 0 };
+    row.getCell(6).numFmt = '0.0%';
+    for (let k = 1; k <= 6; k++) {
+      row.getCell(k).font = font({ bold: true });
+      row.getCell(k).fill = fill(C.totalFill);
+      row.getCell(k).border = { ...box, top: { style: 'medium', color: { argb: C.navy } } };
+    }
+    r += 1;
+  }
+
   // Faturas (consolidado)
   if (isAll) {
     r += 1;
@@ -1990,17 +2451,153 @@ async function buildWorkbook() {
   rs.getCell(`A${r}`).value = 'Documento informativo gerado pelo Fatura Clara. Não substitui a fatura oficial do seu banco.';
   rs.getCell(`A${r}`).font = font({ size: 9, italic: true, color: { argb: C.muted } });
 
+  // ========================== Aba Gastos por Pessoa ==========================
+  const ps = wb.addWorksheet('Gastos por Pessoa', { views: [{ showGridLines: false }], properties: { tabColor: { argb: C.navy } } });
+  ps.columns = [
+    { width: 24 }, { width: 12 }, { width: 12 }, { width: 44 }, { width: 28 },
+    { width: 26 }, { width: 13 }, { width: 18 }, { width: 18 }
+  ];
+  ps.mergeCells('A1:I1');
+  ps.getCell('A1').value = 'Tabela de gastos de cada pessoa no cartão';
+  ps.getCell('A1').font = font({ size: 15, bold: true });
+  ps.mergeCells('A2:I2');
+  ps.getCell('A2').value = filtersActive()
+    ? 'Atenção: tabela gerada com filtros aplicados no site. Nem todos os lançamentos estão incluídos.'
+    : 'Resumo individual com divisão automática das compras compartilhadas';
+  ps.getCell('A2').font = font({ size: 10, italic: true, color: { argb: filtersActive() ? C.danger : C.muted } });
+
+  const listBreakdown = computePeopleBreakdown(list);
+  let pr = 4;
+  ['Pessoa', 'Individuais', 'Divididas', 'Total de compras', 'Valor da parte (R$)', '% dos gastos'].forEach((h, i) => {
+    const c = ps.getRow(pr).getCell(i + 1);
+    c.value = h;
+    c.font = font({ bold: true, color: { argb: C.navyText } });
+    c.fill = fill(C.navy);
+    c.alignment = { horizontal: i === 0 ? 'left' : 'right' };
+    c.border = box;
+  });
+  pr += 1;
+  const psStart = pr;
+  const psEnd = pr + listBreakdown.rows.length - 1;
+  const psTotalRow = psEnd + 1;
+  listBreakdown.rows.forEach((p, i) => {
+    const row = ps.getRow(pr);
+    row.values = [
+      p.name, p.exclusiveCount, p.sharedCount, p.totalCount,
+      +p.totalAmount.toFixed(2),
+      { formula: `E${pr}/E$${psTotalRow}`, result: listBreakdown.totalExpenses ? p.totalAmount / listBreakdown.totalExpenses : 0 }
+    ];
+    row.getCell(5).numFmt = MONEY;
+    row.getCell(6).numFmt = '0.0%';
+    for (let k = 1; k <= 6; k++) {
+      row.getCell(k).border = box;
+      row.getCell(k).font = font();
+      if (i % 2 === 1) row.getCell(k).fill = fill(C.zebra);
+    }
+    pr += 1;
+  });
+  {
+    const row = ps.getRow(pr);
+    row.getCell(1).value = 'Total';
+    row.getCell(2).value = { formula: `SUM(B${psStart}:B${psEnd})`, result: listBreakdown.rows.reduce((s, p) => s + p.exclusiveCount, 0) };
+    row.getCell(3).value = { formula: `SUM(C${psStart}:C${psEnd})`, result: listBreakdown.rows.reduce((s, p) => s + p.sharedCount, 0) };
+    row.getCell(4).value = { formula: `SUM(D${psStart}:D${psEnd})`, result: listBreakdown.rows.reduce((s, p) => s + p.totalCount, 0) };
+    row.getCell(5).value = { formula: `SUM(E${psStart}:E${psEnd})`, result: listBreakdown.totalExpenses };
+    row.getCell(5).numFmt = MONEY;
+    row.getCell(6).value = { formula: `SUM(F${psStart}:F${psEnd})`, result: listBreakdown.totalExpenses ? 1 : 0 };
+    row.getCell(6).numFmt = '0.0%';
+    for (let k = 1; k <= 6; k++) {
+      row.getCell(k).font = font({ bold: true });
+      row.getCell(k).fill = fill(C.totalFill);
+      row.getCell(k).border = { ...box, top: { style: 'medium', color: { argb: C.navy } } };
+    }
+    pr += 2;
+  }
+
+  ps.mergeCells(`A${pr}:I${pr}`);
+  ps.getCell(`A${pr}`).value = 'Detalhamento das compras por pessoa';
+  ps.getCell(`A${pr}`).font = font({ bold: true, size: 12, color: { argb: C.navy } });
+  ps.getCell(`A${pr}`).border = { bottom: { style: 'medium', color: { argb: C.navy } } };
+  pr += 1;
+
+  listBreakdown.rows.filter(p => p.items.length > 0).forEach(p => {
+    pr += 1;
+    ps.mergeCells(`A${pr}:I${pr}`);
+    const pBanner = ps.getCell(`A${pr}`);
+    pBanner.value = `${p.name} — ${p.totalCount} ${p.totalCount === 1 ? 'compra' : 'compras'} · Total da parte: ${fmtBRL(p.totalAmount)}`;
+    pBanner.font = font({ bold: true, size: 11, color: { argb: C.navy } });
+    pBanner.fill = fill(C.soft);
+    pBanner.border = box;
+    pr += 1;
+
+    ['Pessoa', 'Fatura', 'Data', 'Descrição', 'Categoria', 'Participantes', 'Dividido em', 'Valor total (R$)', 'Valor da parte (R$)'].forEach((h, i) => {
+      const c = ps.getRow(pr).getCell(i + 1);
+      c.value = h;
+      c.font = font({ bold: true, color: { argb: C.navyText } });
+      c.fill = fill(C.navy);
+      c.alignment = { horizontal: i >= 7 ? 'right' : i === 6 ? 'center' : 'left' };
+      c.border = box;
+    });
+    pr += 1;
+
+    const dStart = pr;
+    const sortedItems = [...p.items].sort((a, b) => b.tx.date - a.tx.date);
+    sortedItems.forEach((item, idx) => {
+      const extra = item.split.splitCount - item.split.people.length;
+      const participants = item.split.people.join(', ') + (extra > 0 ? ` (+ ${extra})` : '');
+      const row = ps.getRow(pr);
+      row.values = [
+        p.name,
+        item.tx.stmtLabel,
+        xlDate(item.tx.date),
+        item.tx.description,
+        CATEGORIES[item.tx.categoryId].name,
+        participants,
+        item.split.splitCount,
+        +item.tx.amount.toFixed(2),
+        +item.share.toFixed(2)
+      ];
+      row.getCell(3).numFmt = 'dd/mm/yyyy';
+      row.getCell(7).alignment = { horizontal: 'center' };
+      row.getCell(8).numFmt = MONEY;
+      row.getCell(9).numFmt = MONEY;
+      for (let k = 1; k <= 9; k++) {
+        row.getCell(k).border = box;
+        row.getCell(k).font = font();
+        if (idx % 2 === 1) row.getCell(k).fill = fill(C.zebra);
+      }
+      pr += 1;
+    });
+
+    const dEnd = pr - 1;
+    const subRow = ps.getRow(pr);
+    ps.mergeCells(`A${pr}:H${pr}`);
+    subRow.getCell(1).value = `Subtotal (${p.name})`;
+    subRow.getCell(1).alignment = { horizontal: 'right' };
+    subRow.getCell(9).value = { formula: `SUM(I${dStart}:I${dEnd})`, result: +p.totalAmount.toFixed(2) };
+    subRow.getCell(9).numFmt = MONEY;
+    for (let k = 1; k <= 9; k++) {
+      subRow.getCell(k).font = font({ bold: true });
+      subRow.getCell(k).fill = fill(C.totalFill);
+      subRow.getCell(k).border = box;
+    }
+    pr += 1;
+  });
+
   // ============================= Aba Lançamentos =============================
   const ws = wb.addWorksheet('Lançamentos', { views: [{ state: 'frozen', ySplit: 1 }] });
   ws.columns = [
     { header: 'Fatura', key: 'fatura', width: 11 },
     { header: 'Data', key: 'data', width: 12 },
-    { header: 'Descrição', key: 'desc', width: 48 },
-    { header: 'Categoria', key: 'cat', width: 32 },
+    { header: 'Descrição', key: 'desc', width: 46 },
+    { header: 'Categoria', key: 'cat', width: 30 },
     { header: 'Tipo', key: 'tipo', width: 18 },
+    { header: 'Pessoas', key: 'pessoas', width: 26 },
+    { header: 'Dividido em', key: 'dividido', width: 12 },
+    { header: 'Valor por pessoa (R$)', key: 'valorPessoa', width: 18 },
     { header: 'Parcela', key: 'parc', width: 10 },
     { header: 'Assinatura', key: 'ass', width: 11 },
-    { header: 'Marcação', key: 'tag', width: 14 },
+    { header: 'Marcação', key: 'tag', width: 18 },
     { header: 'Valor (R$)', key: 'valor', width: 16 },
     { header: 'Entra no total', key: 'conta', width: 14 }
   ];
@@ -2009,17 +2606,29 @@ async function buildWorkbook() {
   head.eachCell((c, col) => {
     c.font = font({ bold: true, color: { argb: C.navyText } });
     c.fill = fill(C.navy);
-    c.alignment = { vertical: 'middle', horizontal: col === 9 ? 'right' : col >= 6 ? 'center' : 'left' };
+    c.alignment = {
+      vertical: 'middle',
+      horizontal: (col === 8 || col === 12) ? 'right' : (col === 7 || col === 9 || col === 10 || col === 13) ? 'center' : 'left'
+    };
     c.border = box;
   });
 
   list.forEach((t, i) => {
+    const split = getTxSplit(t);
+    const isExp = t.kind === 'EXPENSE';
+    const extra = split.splitCount - split.people.length;
+    const peopleText = isExp
+      ? split.people.join(', ') + (extra > 0 ? ` (+ ${extra})` : '')
+      : '—';
     const row = ws.addRow({
       fatura: t.stmtLabel,
       data: xlDate(t.date),
       desc: t.description,
-      cat: t.kind === 'EXPENSE' ? CATEGORIES[t.categoryId].name : '—',
+      cat: isExp ? CATEGORIES[t.categoryId].name : '—',
       tipo: KIND_LABEL[t.kind],
+      pessoas: peopleText,
+      dividido: isExp ? split.splitCount : '',
+      valorPessoa: isExp ? +split.perPersonAmount.toFixed(2) : '',
       parc: installmentText(t),
       ass: t.isSubscription ? 'Sim' : '',
       tag: TAG_LABELS[t.tag] || '',
@@ -2031,26 +2640,27 @@ async function buildWorkbook() {
       c.border = box;
       c.font = font({ color: { argb: outOfTotal ? C.muted : C.text }, italic: outOfTotal });
       if (i % 2 === 1) c.fill = fill(C.zebra);
-      if (col >= 6 && col !== 9) c.alignment = { horizontal: 'center' };
+      if (col === 7 || col === 9 || col === 10 || col === 13) c.alignment = { horizontal: 'center' };
     });
     row.getCell('data').numFmt = 'dd/mm/yyyy';
     row.getCell('parc').numFmt = '@';
+    if (isExp) row.getCell('valorPessoa').numFmt = MONEY;
     row.getCell('valor').numFmt = MONEY;
     if (t.isDuplicate) row.getCell('desc').note = 'Possível cobrança duplicada';
   });
 
   const lastData = list.length + 1;
-  ws.autoFilter = { from: 'A1', to: `J${lastData}` };
+  ws.autoFilter = { from: 'A1', to: `M${lastData}` };
 
   const totalExpected = list.filter(countsInTotal).reduce((s, t) => s + signedForInvoice(t), 0);
   const addTotal = (label, formula, result, opts = {}) => {
     const row = ws.addRow([]);
-    ws.mergeCells(`A${row.number}:H${row.number}`);
+    ws.mergeCells(`A${row.number}:K${row.number}`);
     row.getCell(1).value = label;
     row.getCell(1).alignment = { horizontal: 'right' };
-    row.getCell(9).value = { formula, result };
-    row.getCell(9).numFmt = MONEY;
-    for (let k = 1; k <= 10; k++) {
+    row.getCell(12).value = { formula, result };
+    row.getCell(12).numFmt = MONEY;
+    for (let k = 1; k <= 13; k++) {
       const c = row.getCell(k);
       c.font = font({ bold: !opts.light, color: { argb: opts.light ? C.muted : C.text }, italic: !!opts.light });
       if (!opts.light) c.fill = fill(C.totalFill);
@@ -2059,24 +2669,25 @@ async function buildWorkbook() {
     return row;
   };
   ws.addRow([]);
-  addTotal('TOTAL (gastos − estornos)', `SUMIFS(I2:I${lastData},J2:J${lastData},"Sim")`, totalExpected, { first: true });
+  addTotal('TOTAL (gastos − estornos)', `SUMIFS(L2:L${lastData},M2:M${lastData},"Sim")`, totalExpected, { first: true });
   if (!isAll || views.length === 1) {
     const d = views[0];
     if (d.m.hasOfficial && !filtersActive()) {
       addTotal('Valor da fatura informado pelo banco', `${d.m.officialTotal.toFixed(2)}`, d.m.officialTotal, { light: true });
     }
   }
-  addTotal('Soma das linhas visíveis (acompanha o filtro do Excel)', `SUBTOTAL(109,I2:I${lastData})`,
+  addTotal('Soma das linhas visíveis (acompanha o filtro do Excel)', `SUBTOTAL(109,L2:L${lastData})`,
     list.reduce((s, t) => s + signedForInvoice(t), 0), { light: true });
 
   if (filtersActive()) {
     const row = ws.addRow([]);
-    ws.mergeCells(`A${row.number}:J${row.number}`);
+    ws.mergeCells(`A${row.number}:M${row.number}`);
     row.getCell(1).value = 'Atenção: esta planilha foi exportada com filtros aplicados no site. Nem todos os lançamentos estão incluídos.';
     row.getCell(1).font = font({ italic: true, color: { argb: C.danger } });
   }
 
   ws.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9 };
+  ps.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9 };
   rs.pageSetup = { orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9 };
   return wb;
 }
@@ -2106,7 +2717,15 @@ async function handleFiles(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length) return;
 
+  const wasOnlySample = state.statements.length > 0 && state.statements.every(s => s.isSample);
   state.statements = state.statements.filter(s => !s.isSample);
+  if (wasOnlySample) {
+    state.people = readJSON(PEOPLE_KEY, ['Eu']);
+    ensurePeopleList();
+    state.customAssignees = readJSON(ASSIGNEES_KEY, {});
+    state.customTags = readJSON('ofx_custom_tags', {});
+    state.personFilter = 'ALL';
+  }
   let added = 0;
   let updated = 0;
   let lastId = null;
@@ -2149,7 +2768,7 @@ const SAMPLE_ITEMS = [
   ['20261016', 4120.50, 'Pagamento recebido'],
   ['20261016', -489.90, 'SUPERMERCADO PAO DE ACUCAR'],
   ['20261017', -74.90, 'IFD*IFOOD BR - HAMBURGUERIA'],
-  ['20261018', -55.90, 'NETFLIX.COM ASSINATURA'],
+  ['20261018', -60.00, 'NETFLIX.COM ASSINATURA'],
   ['20261018', -21.90, 'SPOTIFY BRASIL'],
   ['20261019', -349.90, 'AMAZON BR ELETRONICOS - Parcela 03/10'],
   ['20261020', -28.40, 'UBER *TRIP HELP.UBER.COM'],
@@ -2239,10 +2858,15 @@ function loadSample() {
   state.activeId = 'ALL';
   state.cardFilter = 'ALL';
   state.categoryFilter = 'ALL';
+  state.personFilter = 'ALL';
+  state.people = ['Eu', 'Anna', 'Liliane'];
   const nubankNov = state.statements[2];
   const itauNov = state.statements[3];
   state.customTags[`${itauNov.id}#0`] = 'reembolsavel';
   state.customTags[`${nubankNov.id}#19`] = 'dividido';
+  state.customAssignees[`${nubankNov.id}#3`] = { people: ['Eu', 'Anna', 'Liliane'], splitCount: 3 };
+  state.customAssignees[`${nubankNov.id}#17`] = { people: ['Anna'], splitCount: 1 };
+  state.customAssignees[`${nubankNov.id}#19`] = { people: ['Eu', 'Liliane'], splitCount: 2 };
   render();
 }
 
@@ -2255,13 +2879,16 @@ function applyThemeIcon() {
 }
 
 function clearAll() {
-  if (!confirm('Apagar todas as faturas, categorias personalizadas e marcações salvas neste navegador?')) return;
-  ['ofx_custom_categories', 'ofx_custom_tags', STORAGE_KEY].forEach(k => localStorage.removeItem(k));
+  if (!confirm('Apagar todas as faturas, categorias personalizadas, pessoas e marcações salvas neste navegador?')) return;
+  ['ofx_custom_categories', 'ofx_custom_tags', PEOPLE_KEY, ASSIGNEES_KEY, STORAGE_KEY].forEach(k => localStorage.removeItem(k));
   state.statements = [];
   state.customCategories = {};
   state.customTags = {};
+  state.people = ['Eu'];
+  state.customAssignees = {};
   state.activeId = null;
   state.cardFilter = 'ALL';
+  state.personFilter = 'ALL';
   render();
   toast('Todos os dados foram apagados deste navegador.');
 }
@@ -2323,6 +2950,12 @@ document.addEventListener('DOMContentLoaded', () => {
     render();
   });
   ['f-search', 'f-type', 'f-tag', 'f-sort'].forEach(id => document.getElementById(id).addEventListener('input', () => { state.tableLimit = 100; renderTable(); }));
+  document.getElementById('f-person').addEventListener('input', e => {
+    state.personFilter = e.target.value;
+    state.tableLimit = 100;
+    renderReimbursementCard();
+    renderTable();
+  });
   document.getElementById('f-category').addEventListener('input', e => setCategoryFilter(e.target.value));
   document.getElementById('btn-more-rows').addEventListener('click', () => { state.tableLimit += 100; renderTable(); });
   document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {

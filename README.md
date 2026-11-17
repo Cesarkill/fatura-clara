@@ -9,11 +9,12 @@ Analisador inteligente de faturas de cartão de crédito exportadas em formato *
 - **Suporte a múltiplas faturas e filtro por cartão (OFX 1.x SGML e 2.x XML):** importe vários meses e cartões diferentes, filtre a **Visão consolidada** por cartão/banco, acompanhe a evolução mês a mês e consulte os dados salvos localmente no navegador (`localStorage`).
 - **Conciliação com o saldo oficial do banco:** utiliza o valor oficial informado na tag `<LEDGERBAL>` do OFX, exclui saldo pendente de faturas anteriores do total de gastos novos e separa compras, parcelamento de fatura e encargos (juros, multas e IOF).
 - **Categorização automática e editável:** classifica estabelecimentos automaticamente e memoriza alterações de categoria por estabelecimento entre faturas.
+- **Gastos por pessoa e divisão do cartão:** cadastre outras pessoas que também usam o cartão, marque quem participou de cada compra ou edite por quantas pessoas o valor foi dividido (ex.: Netflix R$ 60,00 dividida entre 3 pessoas = R$ 20,00 para cada), visualize a tabela de gastos por pessoa e copie o resumo individual ou geral para o WhatsApp.
 - **Acerto de contas e reembolsos:** marque gastos como **Reembolsável (100%)** ou **Dividido (50%)**, veja o total a receber calculado automaticamente e copie o resumo formatado para o WhatsApp.
 - **Mini-relatório de busca:** ao pesquisar qualquer estabelecimento na tabela, exibe total gasto, quantidade de compras, ticket médio, maior compra e evolução ao longo dos meses importados.
 - **Radar de auditoria:** detecta possíveis cobranças duplicadas, assinaturas recorrentes, pequenas compras acumuladas e projeção de parcelas futuras.
 - **Assistente de voz em português:** leitura em voz alta do resumo da fatura ou da lista completa de gastos filtrados via Web Speech API.
-- **Exportação para Excel (`.xlsx`) e CSV:** gera planilha formatada com abas **Resumo** e **Lançamentos**, larguras ajustadas, parcelas em texto (`"1 de 2"`), filtro automático e linhas de total (`SUMIFS` e `SUBTOTAL`).
+- **Exportação para Excel (`.xlsx`) e CSV:** gera planilha formatada com abas **Resumo**, **Gastos por Pessoa** (tabela por pessoa + detalhamento com subtotais) e **Lançamentos**, larguras ajustadas, parcelas em texto (`"1 de 2"`), filtro automático e linhas de total (`SUMIFS` e `SUBTOTAL`).
 - **Tema claro e escuro:** alternância persistida no navegador e layout responsivo.
 
 ## Estrutura do projeto
