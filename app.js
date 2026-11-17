@@ -1496,10 +1496,14 @@ function computePeopleBreakdown(txList = currentTransactions()) {
         name,
         isManualExtra,
         exclusiveCount: 0,
+        exclusiveAmount: 0,
         sharedCount: 0,
+        sharedAmount: 0,
         totalCount: 0,
         totalAmount: 0,
         pct: 0,
+        byCategory: [],
+        itemsSummary: '',
         items: []
       };
     }
@@ -1516,8 +1520,13 @@ function computePeopleBreakdown(txList = currentTransactions()) {
 
     split.people.forEach(pName => {
       const bucket = ensureBucket(pName);
-      if (isShared) bucket.sharedCount += 1;
-      else bucket.exclusiveCount += 1;
+      if (isShared) {
+        bucket.sharedCount += 1;
+        bucket.sharedAmount += split.perPersonAmount;
+      } else {
+        bucket.exclusiveCount += 1;
+        bucket.exclusiveAmount += split.perPersonAmount;
+      }
       bucket.totalCount += 1;
       bucket.totalAmount += split.perPersonAmount;
       bucket.items.push({ tx: t, share: split.perPersonAmount, split, extraShares: 1 });
@@ -1525,18 +1534,60 @@ function computePeopleBreakdown(txList = currentTransactions()) {
 
     if (split.splitCount > split.people.length) {
       const extraShares = split.splitCount - split.people.length;
+      const shareAmt = split.perPersonAmount * extraShares;
       const bucket = ensureBucket('Outras pessoas (divisão manual)', true);
       bucket.sharedCount += 1;
+      bucket.sharedAmount += shareAmt;
       bucket.totalCount += 1;
-      bucket.totalAmount += split.perPersonAmount * extraShares;
-      bucket.items.push({ tx: t, share: split.perPersonAmount * extraShares, split, extraShares });
+      bucket.totalAmount += shareAmt;
+      bucket.items.push({ tx: t, share: shareAmt, split, extraShares });
     }
   });
 
-  const rows = Object.values(map).map(p => ({
-    ...p,
-    pct: totalExpenses > 0 ? (p.totalAmount / totalExpenses) * 100 : 0
-  }));
+  const rows = Object.values(map).map(p => {
+    const catMap = {};
+    p.items.forEach(({ tx, share }) => {
+      const cid = tx.categoryId || 'outros';
+      if (!catMap[cid]) {
+        catMap[cid] = {
+          id: cid,
+          name: CATEGORIES[cid].name,
+          count: 0,
+          amount: 0,
+          itemLabels: new Set()
+        };
+      }
+      catMap[cid].count += 1;
+      catMap[cid].amount += share;
+      catMap[cid].itemLabels.add(prettyMerchant(tx.description));
+    });
+
+    const byCategory = Object.values(catMap)
+      .sort((a, b) => b.amount - a.amount)
+      .map(c => ({
+        id: c.id,
+        name: c.name,
+        count: c.count,
+        amount: c.amount,
+        itemsText: [...c.itemLabels].join(', ')
+      }));
+
+    const sortedItems = [...p.items].sort((a, b) => b.share - a.share);
+    const summaryParts = sortedItems.slice(0, 10).map(({ tx, share, split }) => {
+      const divTag = split.splitCount > 1 ? ` ÷${split.splitCount}` : '';
+      return `${prettyMerchant(tx.description)}${divTag} (${fmtBRL(share)})`;
+    });
+    if (sortedItems.length > 10) {
+      summaryParts.push(`+ ${sortedItems.length - 10} itens`);
+    }
+
+    return {
+      ...p,
+      pct: totalExpenses > 0 ? (p.totalAmount / totalExpenses) * 100 : 0,
+      byCategory,
+      itemsSummary: summaryParts.join(', ')
+    };
+  });
 
   return { rows, totalExpenses };
 }
@@ -1662,21 +1713,46 @@ function renderReimbursementCard() {
       </span>`;
   }).join('');
 
-  const personRowsHtml = breakdown.rows.map(p => `
-    <tr>
-      <td><strong>${escapeHtml(p.name)}</strong></td>
-      <td class="num" style="text-align:right;">${p.exclusiveCount}</td>
-      <td class="num" style="text-align:right;">${p.sharedCount}</td>
-      <td class="num" style="text-align:right;">${p.totalCount}</td>
-      <td class="num" style="text-align:right;"><strong>${fmtBRL(p.totalAmount)}</strong></td>
-      <td class="num" style="text-align:right;">${fmtPct(p.pct)}</td>
-      <td style="text-align:right;white-space:nowrap;">
-        <div class="person-row-actions">
-          ${p.isManualExtra ? '' : `<button type="button" class="btn btn-sm btn-ghost" data-filter-person="${escapeHtml(p.name)}">${state.personFilter === p.name ? 'Limpar filtro' : 'Filtrar'}</button>`}
-          ${p.totalCount > 0 ? `<button type="button" class="btn btn-sm" data-copy-person="${escapeHtml(p.name)}" title="Copiar resumo de ${escapeHtml(p.name)} para WhatsApp">${icon('copy', 13)} WhatsApp</button>` : ''}
-        </div>
-      </td>
-    </tr>`).join('');
+  const sumExclusive = breakdown.rows.reduce((s, p) => s + p.exclusiveAmount, 0);
+  const sumShared = breakdown.rows.reduce((s, p) => s + p.sharedAmount, 0);
+
+  const personRowsHtml = breakdown.rows.map(p => {
+    const topItems = [...p.items]
+      .sort((a, b) => b.share - a.share)
+      .slice(0, 4)
+      .map(({ tx, share, split }) => `${escapeHtml(prettyMerchant(tx.description))}${split.splitCount > 1 ? ` ÷${split.splitCount}` : ''} (${fmtBRL(share)})`);
+    const extraCount = p.items.length > 4 ? ` <span style="color:var(--muted);">+ ${p.items.length - 4} itens</span>` : '';
+    const catPills = p.byCategory.slice(0, 3)
+      .map(c => `<span class="badge">${escapeHtml(c.name)}: ${fmtBRL(c.amount)}</span>`)
+      .join('');
+    const previewHtml = p.totalCount > 0
+      ? `<div class="person-items-preview">${topItems.join(', ')}${extraCount}</div>${catPills ? `<div class="person-cat-pills">${catPills}</div>` : ''}`
+      : '<span style="color:var(--muted);font-size:12px;">Sem gastos atribuídos</span>';
+
+    return `
+      <tr>
+        <td><strong>${escapeHtml(p.name)}</strong></td>
+        <td>${previewHtml}</td>
+        <td class="num" style="text-align:right;white-space:nowrap;">
+          <div>${fmtBRL(p.exclusiveAmount)}</div>
+          <div style="font-size:11.5px;color:var(--muted);">${p.exclusiveCount} ${p.exclusiveCount === 1 ? 'compra' : 'compras'}</div>
+        </td>
+        <td class="num" style="text-align:right;white-space:nowrap;">
+          <div>${fmtBRL(p.sharedAmount)}</div>
+          <div style="font-size:11.5px;color:var(--muted);">${p.sharedCount} ${p.sharedCount === 1 ? 'compra' : 'compras'}</div>
+        </td>
+        <td class="num" style="text-align:right;white-space:nowrap;">
+          <div><strong>${fmtBRL(p.totalAmount)}</strong></div>
+          <div style="font-size:11.5px;color:var(--muted);">${fmtPct(p.pct)}</div>
+        </td>
+        <td style="text-align:right;white-space:nowrap;">
+          <div class="person-row-actions">
+            ${p.isManualExtra ? '' : `<button type="button" class="btn btn-sm btn-ghost" data-filter-person="${escapeHtml(p.name)}">${state.personFilter === p.name ? 'Limpar filtro' : 'Filtrar'}</button>`}
+            ${p.totalCount > 0 ? `<button type="button" class="btn btn-sm" data-copy-person="${escapeHtml(p.name)}" title="Copiar resumo de ${escapeHtml(p.name)} para WhatsApp">${icon('copy', 13)} WhatsApp</button>` : ''}
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
 
   const reimbSectionHtml = reimbItems.length ? `
     <div style="margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border);">
@@ -1736,11 +1812,10 @@ function renderReimbursementCard() {
         <thead>
           <tr>
             <th>Pessoa</th>
+            <th>Com o que gastou (itens e categorias)</th>
             <th style="text-align:right;">Individuais</th>
             <th style="text-align:right;">Divididas</th>
-            <th style="text-align:right;">Total de compras</th>
-            <th style="text-align:right;">Valor da parte</th>
-            <th style="text-align:right;">% dos gastos</th>
+            <th style="text-align:right;">Total da parte</th>
             <th style="text-align:right;">Ações</th>
           </tr>
         </thead>
@@ -1750,9 +1825,10 @@ function renderReimbursementCard() {
         <tfoot>
           <tr style="background: var(--surface-2); font-weight: 600;">
             <td>Total dos gastos</td>
-            <td colspan="3"></td>
-            <td class="num" style="text-align:right;">${fmtBRL(breakdown.totalExpenses)}</td>
-            <td class="num" style="text-align:right;">100,0%</td>
+            <td></td>
+            <td class="num" style="text-align:right;">${fmtBRL(sumExclusive)}</td>
+            <td class="num" style="text-align:right;">${fmtBRL(sumShared)}</td>
+            <td class="num" style="text-align:right;">${fmtBRL(breakdown.totalExpenses)} <span style="font-weight:400;color:var(--muted);font-size:11.5px;">(100,0%)</span></td>
             <td></td>
           </tr>
         </tfoot>
@@ -1944,7 +2020,154 @@ function filteredTransactions() {
   return list.sort(cmp);
 }
 
+let activeSplitPopover = null;
+let splitPopoverListenersBound = false;
+
+function closeSplitPopover(refreshIfFiltered = false) {
+  if (!activeSplitPopover) return;
+  activeSplitPopover.el.remove();
+  activeSplitPopover = null;
+  if (refreshIfFiltered && state.personFilter !== 'ALL') {
+    renderTable();
+  }
+}
+
+function bindSplitPopoverGlobalListeners() {
+  if (splitPopoverListenersBound) return;
+  splitPopoverListenersBound = true;
+  document.addEventListener('click', e => {
+    if (activeSplitPopover && !activeSplitPopover.el.contains(e.target) && !activeSplitPopover.btn.contains(e.target)) {
+      closeSplitPopover(true);
+    }
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && activeSplitPopover) closeSplitPopover(true);
+  });
+  window.addEventListener('scroll', () => {
+    if (activeSplitPopover) closeSplitPopover(false);
+  }, { passive: true });
+  const txWrap = document.getElementById('tx-body')?.closest('.table-wrap');
+  if (txWrap) {
+    txWrap.addEventListener('scroll', () => {
+      if (activeSplitPopover) closeSplitPopover(false);
+    }, { passive: true });
+  }
+}
+
+function formatPeopleTrigger(people) {
+  if (!people || !people.length) return 'Eu';
+  if (people.length <= 2) return people.join(', ');
+  return `${people[0]}, ${people[1]} +${people.length - 2}`;
+}
+
+function syncRowSplitCell(cell, tx) {
+  if (!cell || !tx) return;
+  const split = getTxSplit(tx);
+  const btn = cell.querySelector('.split-picker-btn');
+  if (btn) {
+    btn.textContent = formatPeopleTrigger(split.people);
+    btn.title = split.people.join(', ');
+    btn.classList.toggle('has-split', split.splitCount > 1 || normalizeText(split.people[0]) !== 'eu');
+  }
+  const countInput = cell.querySelector('[data-split-count]');
+  if (countInput && document.activeElement !== countInput) {
+    countInput.value = split.splitCount;
+  }
+  let meta = cell.querySelector('.split-meta');
+  if (split.splitCount > 1) {
+    if (!meta) {
+      meta = document.createElement('div');
+      meta.className = 'split-meta num';
+      cell.appendChild(meta);
+    }
+    meta.textContent = `÷ ${split.splitCount} · ${fmtBRL(split.perPersonAmount)} cada`;
+  } else if (meta) {
+    meta.remove();
+  }
+}
+
+function openSplitPopover(btn, tx, cell) {
+  bindSplitPopoverGlobalListeners();
+  if (activeSplitPopover && activeSplitPopover.txId === tx.id) {
+    closeSplitPopover(true);
+    return;
+  }
+  closeSplitPopover(false);
+
+  const pop = document.createElement('div');
+  pop.className = 'split-popover';
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-label', 'Selecionar pessoas da compra');
+  pop.style.visibility = 'hidden';
+
+  const renderPopBody = () => {
+    const split = getTxSplit(tx);
+    pop.innerHTML = `
+      <div class="split-popover-actions">
+        <button type="button" class="btn btn-sm" data-pop-action="me">Só Eu</button>
+        <button type="button" class="btn btn-sm" data-pop-action="all">Todos</button>
+      </div>
+      <div class="split-popover-list">
+        ${state.people.map(p => {
+          const checked = split.people.includes(p);
+          return `
+            <label class="split-check-item">
+              <input type="checkbox" value="${escapeHtml(p)}" ${checked ? 'checked' : ''} />
+              <span>${escapeHtml(p)}</span>
+            </label>`;
+        }).join('')}
+      </div>`;
+
+    pop.querySelector('[data-pop-action="me"]').addEventListener('click', () => {
+      setTxSplit(tx.id, ['Eu'], 1, { skipTableRender: true });
+      syncRowSplitCell(cell, tx);
+      renderPopBody();
+    });
+
+    pop.querySelector('[data-pop-action="all"]').addEventListener('click', () => {
+      setTxSplit(tx.id, [...state.people], state.people.length, { skipTableRender: true });
+      syncRowSplitCell(cell, tx);
+      renderPopBody();
+    });
+
+    pop.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const current = getTxSplit(tx).people;
+        const pName = cb.value;
+        let nextPeople;
+        if (cb.checked) {
+          const set = new Set([...current, pName]);
+          nextPeople = state.people.filter(p => set.has(p));
+          set.forEach(p => { if (!nextPeople.includes(p)) nextPeople.push(p); });
+        } else {
+          nextPeople = current.filter(p => p !== pName);
+        }
+        if (!nextPeople.length) nextPeople = ['Eu'];
+        setTxSplit(tx.id, nextPeople, nextPeople.length, { skipTableRender: true });
+        syncRowSplitCell(cell, tx);
+        renderPopBody();
+      });
+    });
+  };
+
+  renderPopBody();
+  document.body.appendChild(pop);
+
+  const rect = btn.getBoundingClientRect();
+  const popHeight = pop.offsetHeight || 220;
+  const popWidth = pop.offsetWidth || 230;
+  const openUp = rect.bottom + popHeight > window.innerHeight - 12 && rect.top > popHeight + 12;
+  const top = openUp ? Math.max(8, rect.top - popHeight - 4) : Math.min(window.innerHeight - popHeight - 8, rect.bottom + 4);
+  const left = Math.max(8, Math.min(window.innerWidth - popWidth - 8, rect.left));
+  pop.style.top = `${top}px`;
+  pop.style.left = `${left}px`;
+  pop.style.visibility = 'visible';
+
+  activeSplitPopover = { txId: tx.id, el: pop, btn };
+}
+
 function renderTable() {
+  closeSplitPopover(false);
   const body = document.getElementById('tx-body');
   const list = filteredTransactions();
   renderSearchSpotlight(list);
@@ -1985,14 +2208,11 @@ function renderTable() {
     let personCell = '<span class="cat-tag" style="color:var(--muted)">—</span>';
     if (t.kind === 'EXPENSE') {
       const split = getTxSplit(t);
-      const chips = state.people.map(p => {
-        const active = split.people.includes(p);
-        return `<button type="button" class="person-chip ${active ? 'active' : ''}" data-tx-person="${escapeHtml(t.id)}" data-person-name="${escapeHtml(p)}" aria-pressed="${active}">${escapeHtml(p)}</button>`;
-      }).join('');
+      const hasCustomSplit = split.splitCount > 1 || normalizeText(split.people[0]) !== 'eu';
       personCell = `
         <div class="tx-split-cell">
           <div class="tx-person-row">
-            <div class="tx-person-chips">${chips}</div>
+            <button type="button" class="split-picker-btn ${hasCustomSplit ? 'has-split' : ''}" data-split-picker="${escapeHtml(t.id)}" title="${escapeHtml(split.people.join(', '))}">${escapeHtml(formatPeopleTrigger(split.people))}</button>
             <label class="split-count-wrap" title="Em quantas pessoas esta compra foi dividida">
               <span>÷</span>
               <input type="number" class="split-count-input num" min="1" max="50" value="${split.splitCount}" data-split-count="${escapeHtml(t.id)}" aria-label="Em quantas pessoas dividir" />
@@ -2030,23 +2250,13 @@ function renderTable() {
     });
   });
 
-  body.querySelectorAll('[data-tx-person]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const txId = btn.getAttribute('data-tx-person');
-      const personName = btn.getAttribute('data-person-name');
+  body.querySelectorAll('[data-split-picker]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const txId = btn.getAttribute('data-split-picker');
       const tx = txMap[txId];
       if (!tx) return;
-      const split = getTxSplit(tx);
-      let nextPeople;
-      if (split.people.includes(personName)) {
-        nextPeople = split.people.filter(p => p !== personName);
-      } else {
-        const set = new Set([...split.people, personName]);
-        nextPeople = state.people.filter(p => set.has(p));
-        set.forEach(p => { if (!nextPeople.includes(p)) nextPeople.push(p); });
-      }
-      if (!nextPeople.length) nextPeople = ['Eu'];
-      setTxSplit(txId, nextPeople, nextPeople.length);
+      openSplitPopover(btn, tx, btn.closest('.tx-split-cell'));
     });
   });
 
@@ -2062,18 +2272,7 @@ function renderTable() {
       const nextPeople = count < split.people.length ? split.people.slice(0, count) : split.people;
       setTxSplit(txId, nextPeople, count, { skipTableRender: !finalize });
       if (!finalize) {
-        const cell = input.closest('.tx-split-cell');
-        let meta = cell.querySelector('.split-meta');
-        if (count > 1) {
-          if (!meta) {
-            meta = document.createElement('div');
-            meta.className = 'split-meta num';
-            cell.appendChild(meta);
-          }
-          meta.textContent = `÷ ${count} · ${fmtBRL(tx.amount / count)} cada`;
-        } else if (meta) {
-          meta.remove();
-        }
+        syncRowSplitCell(input.closest('.tx-split-cell'), tx);
       }
     };
     input.addEventListener('input', () => updateSplitInput(false));
@@ -2191,6 +2390,26 @@ function exportCSV() {
   const total = list.filter(countsInTotal).reduce((s, t) => s + signedForInvoice(t), 0);
   rows.push('');
   rows.push([q('TOTAL (gastos − estornos)'), '', '', '', '', '', '', '', '', '', '', money(total), ''].join(';'));
+
+  const bd = computePeopleBreakdown(list);
+  const peopleWithItems = bd.rows.filter(p => p.items.length > 0);
+  if (peopleWithItems.length) {
+    rows.push('');
+    rows.push(q('GASTOS POR PESSOA — DETALHAMENTO'));
+    rows.push(['Pessoa', 'Qtd. compras', 'Individuais (R$)', 'Divididas (R$)', 'Total da parte (R$)', 'Com o que gastou'].map(q).join(';'));
+    peopleWithItems.forEach(p => {
+      rows.push([q(p.name), p.totalCount, money(p.exclusiveAmount), money(p.sharedAmount), money(p.totalAmount), q(p.itemsSummary)].join(';'));
+    });
+    rows.push('');
+    rows.push(['Pessoa', 'Data', 'O que comprou', 'Categoria', 'Divisão', 'Valor da parte (R$)'].map(q).join(';'));
+    peopleWithItems.forEach(p => {
+      [...p.items].sort((a, b) => b.tx.date - a.tx.date).forEach(item => {
+        const divTxt = item.split.splitCount > 1 ? `${item.split.splitCount}x de ${money(item.tx.amount)}` : 'Individual';
+        rows.push([q(p.name), fmtDate(item.tx.date), q(item.tx.description), q(CATEGORIES[item.tx.categoryId].name), q(divTxt), money(item.share)].join(';'));
+      });
+    });
+  }
+
   download(new Blob(['\uFEFF' + [header.join(';'), ...rows].join('\r\n')], { type: 'text/csv;charset=utf-8;' }), `${exportFileBase()}.csv`);
 }
 
@@ -2247,7 +2466,7 @@ async function buildWorkbook() {
 
   // =============================== Aba Resumo ===============================
   const rs = wb.addWorksheet('Resumo', { views: [{ showGridLines: false }], properties: { tabColor: { argb: C.navy } } });
-  rs.columns = [{ width: 46 }, { width: 16 }, { width: 18 }, { width: 16 }, { width: 18 }, { width: 18 }];
+  rs.columns = [{ width: 42 }, { width: 15 }, { width: 36 }, { width: 26 }, { width: 20 }, { width: 54 }];
 
   const first = views[0].stmt;
   const last = views[views.length - 1].stmt;
@@ -2358,50 +2577,111 @@ async function buildWorkbook() {
   if (peopleResumo.rows.length) {
     r += 1;
     section('Gastos por pessoa no cartão');
-    ['Pessoa', 'Individuais', 'Divididas', 'Total de compras', 'Valor da parte (R$)', '% dos gastos'].forEach((h, i) => {
+    ['Pessoa', 'Qtd. compras', 'Individuais (R$)', 'Divididas (R$)', 'Total da parte (R$)', 'Com o que gastou (itens e categorias)'].forEach((h, i) => {
       const c = rs.getRow(r).getCell(i + 1);
       c.value = h;
       c.font = font({ bold: true, color: { argb: C.navyText } });
       c.fill = fill(C.navy);
-      c.alignment = { horizontal: i === 0 ? 'left' : 'right' };
+      c.alignment = { horizontal: (i === 0 || i === 5) ? 'left' : 'right' };
       c.border = box;
     });
     r += 1;
     const pStart = r;
     const pEnd = r + peopleResumo.rows.length - 1;
-    const pTotalRow = pEnd + 1;
     const pSum = peopleResumo.totalExpenses;
     peopleResumo.rows.forEach((p, i) => {
       const row = rs.getRow(r);
       row.values = [
-        p.name, p.exclusiveCount, p.sharedCount, p.totalCount,
+        p.name,
+        p.totalCount,
+        +p.exclusiveAmount.toFixed(2),
+        +p.sharedAmount.toFixed(2),
         +p.totalAmount.toFixed(2),
-        { formula: `E${r}/E$${pTotalRow}`, result: pSum ? p.totalAmount / pSum : 0 }
+        p.itemsSummary || 'Sem gastos atribuídos'
       ];
+      row.getCell(3).numFmt = MONEY;
+      row.getCell(4).numFmt = MONEY;
       row.getCell(5).numFmt = MONEY;
-      row.getCell(6).numFmt = '0.0%';
       for (let k = 1; k <= 6; k++) {
         row.getCell(k).border = box;
         row.getCell(k).font = font();
         if (i % 2 === 1) row.getCell(k).fill = fill(C.zebra);
       }
+      row.getCell(6).alignment = { wrapText: true, vertical: 'top' };
       r += 1;
     });
     const row = rs.getRow(r);
     row.getCell(1).value = 'Total';
-    row.getCell(2).value = { formula: `SUM(B${pStart}:B${pEnd})`, result: peopleResumo.rows.reduce((s, p) => s + p.exclusiveCount, 0) };
-    row.getCell(3).value = { formula: `SUM(C${pStart}:C${pEnd})`, result: peopleResumo.rows.reduce((s, p) => s + p.sharedCount, 0) };
-    row.getCell(4).value = { formula: `SUM(D${pStart}:D${pEnd})`, result: peopleResumo.rows.reduce((s, p) => s + p.totalCount, 0) };
+    row.getCell(2).value = { formula: `SUM(B${pStart}:B${pEnd})`, result: peopleResumo.rows.reduce((s, p) => s + p.totalCount, 0) };
+    row.getCell(3).value = { formula: `SUM(C${pStart}:C${pEnd})`, result: peopleResumo.rows.reduce((s, p) => s + p.exclusiveAmount, 0) };
+    row.getCell(3).numFmt = MONEY;
+    row.getCell(4).value = { formula: `SUM(D${pStart}:D${pEnd})`, result: peopleResumo.rows.reduce((s, p) => s + p.sharedAmount, 0) };
+    row.getCell(4).numFmt = MONEY;
     row.getCell(5).value = { formula: `SUM(E${pStart}:E${pEnd})`, result: pSum };
     row.getCell(5).numFmt = MONEY;
-    row.getCell(6).value = { formula: `SUM(F${pStart}:F${pEnd})`, result: pSum ? 1 : 0 };
-    row.getCell(6).numFmt = '0.0%';
+    row.getCell(6).value = '';
     for (let k = 1; k <= 6; k++) {
       row.getCell(k).font = font({ bold: true });
       row.getCell(k).fill = fill(C.totalFill);
       row.getCell(k).border = { ...box, top: { style: 'medium', color: { argb: C.navy } } };
     }
     r += 1;
+
+    const detailRows = [];
+    peopleResumo.rows.filter(p => p.items.length > 0).forEach(p => {
+      [...p.items].sort((a, b) => b.tx.date - a.tx.date).forEach(item => {
+        detailRows.push({ person: p.name, item });
+      });
+    });
+
+    if (detailRows.length) {
+      r += 1;
+      section('Detalhamento: com o que cada pessoa gastou');
+      ['Pessoa', 'Data', 'O que comprou (Descrição)', 'Categoria', 'Divisão', 'Valor da parte (R$)'].forEach((h, i) => {
+        const c = rs.getRow(r).getCell(i + 1);
+        c.value = h;
+        c.font = font({ bold: true, color: { argb: C.navyText } });
+        c.fill = fill(C.navy);
+        c.alignment = { horizontal: i === 5 ? 'right' : i === 1 ? 'center' : 'left' };
+        c.border = box;
+      });
+      r += 1;
+      const detStart = r;
+      detailRows.forEach(({ person, item }, i) => {
+        const divTxt = item.split.splitCount > 1 ? `÷ ${item.split.splitCount} de ${fmtBRL(item.tx.amount)}` : 'Individual';
+        const dRow = rs.getRow(r);
+        dRow.values = [
+          person,
+          xlDate(item.tx.date),
+          item.tx.description,
+          CATEGORIES[item.tx.categoryId].name,
+          divTxt,
+          +item.share.toFixed(2)
+        ];
+        dRow.getCell(2).numFmt = 'dd/mm/yyyy';
+        dRow.getCell(2).alignment = { horizontal: 'center' };
+        dRow.getCell(6).numFmt = MONEY;
+        for (let k = 1; k <= 6; k++) {
+          dRow.getCell(k).border = box;
+          dRow.getCell(k).font = font();
+          if (i % 2 === 1) dRow.getCell(k).fill = fill(C.zebra);
+        }
+        r += 1;
+      });
+      const detEnd = r - 1;
+      const detTotal = rs.getRow(r);
+      rs.mergeCells(`A${r}:E${r}`);
+      detTotal.getCell(1).value = 'Total detalhado';
+      detTotal.getCell(1).alignment = { horizontal: 'right' };
+      detTotal.getCell(6).value = { formula: `SUM(F${detStart}:F${detEnd})`, result: +pSum.toFixed(2) };
+      detTotal.getCell(6).numFmt = MONEY;
+      for (let k = 1; k <= 6; k++) {
+        detTotal.getCell(k).font = font({ bold: true });
+        detTotal.getCell(k).fill = fill(C.totalFill);
+        detTotal.getCell(k).border = { ...box, top: { style: 'medium', color: { argb: C.navy } } };
+      }
+      r += 1;
+    }
   }
 
   // Faturas (consolidado)
@@ -2454,7 +2734,7 @@ async function buildWorkbook() {
   // ========================== Aba Gastos por Pessoa ==========================
   const ps = wb.addWorksheet('Gastos por Pessoa', { views: [{ showGridLines: false }], properties: { tabColor: { argb: C.navy } } });
   ps.columns = [
-    { width: 24 }, { width: 12 }, { width: 12 }, { width: 44 }, { width: 28 },
+    { width: 22 }, { width: 16 }, { width: 16 }, { width: 38 }, { width: 26 },
     { width: 26 }, { width: 13 }, { width: 18 }, { width: 18 }
   ];
   ps.mergeCells('A1:I1');
@@ -2463,33 +2743,54 @@ async function buildWorkbook() {
   ps.mergeCells('A2:I2');
   ps.getCell('A2').value = filtersActive()
     ? 'Atenção: tabela gerada com filtros aplicados no site. Nem todos os lançamentos estão incluídos.'
-    : 'Resumo individual com divisão automática das compras compartilhadas';
+    : 'Resumo individual com divisão automática e detalhamento do que cada pessoa comprou';
   ps.getCell('A2').font = font({ size: 10, italic: true, color: { argb: filtersActive() ? C.danger : C.muted } });
 
   const listBreakdown = computePeopleBreakdown(list);
   let pr = 4;
-  ['Pessoa', 'Individuais', 'Divididas', 'Total de compras', 'Valor da parte (R$)', '% dos gastos'].forEach((h, i) => {
-    const c = ps.getRow(pr).getCell(i + 1);
-    c.value = h;
+  [
+    { col: 1, title: 'Pessoa', align: 'left' },
+    { col: 2, title: 'Individuais (R$)', align: 'right' },
+    { col: 3, title: 'Divididas (R$)', align: 'right' },
+    { col: 4, title: 'Total da parte (R$)', align: 'right' },
+    { col: 5, title: '% dos gastos', align: 'right' }
+  ].forEach(({ col, title, align }) => {
+    const c = ps.getRow(pr).getCell(col);
+    c.value = title;
     c.font = font({ bold: true, color: { argb: C.navyText } });
     c.fill = fill(C.navy);
-    c.alignment = { horizontal: i === 0 ? 'left' : 'right' };
+    c.alignment = { horizontal: align };
     c.border = box;
   });
+  ps.mergeCells(`F${pr}:I${pr}`);
+  for (let k = 6; k <= 9; k++) {
+    const c = ps.getRow(pr).getCell(k);
+    if (k === 6) c.value = 'Com o que gastou (itens e categorias)';
+    c.font = font({ bold: true, color: { argb: C.navyText } });
+    c.fill = fill(C.navy);
+    c.alignment = { horizontal: 'left' };
+    c.border = box;
+  }
   pr += 1;
+
   const psStart = pr;
   const psEnd = pr + listBreakdown.rows.length - 1;
   const psTotalRow = psEnd + 1;
   listBreakdown.rows.forEach((p, i) => {
     const row = ps.getRow(pr);
-    row.values = [
-      p.name, p.exclusiveCount, p.sharedCount, p.totalCount,
-      +p.totalAmount.toFixed(2),
-      { formula: `E${pr}/E$${psTotalRow}`, result: listBreakdown.totalExpenses ? p.totalAmount / listBreakdown.totalExpenses : 0 }
-    ];
-    row.getCell(5).numFmt = MONEY;
-    row.getCell(6).numFmt = '0.0%';
-    for (let k = 1; k <= 6; k++) {
+    row.getCell(1).value = p.name;
+    row.getCell(2).value = +p.exclusiveAmount.toFixed(2);
+    row.getCell(3).value = +p.sharedAmount.toFixed(2);
+    row.getCell(4).value = +p.totalAmount.toFixed(2);
+    row.getCell(5).value = { formula: `D${pr}/D$${psTotalRow}`, result: listBreakdown.totalExpenses ? p.totalAmount / listBreakdown.totalExpenses : 0 };
+    row.getCell(2).numFmt = MONEY;
+    row.getCell(3).numFmt = MONEY;
+    row.getCell(4).numFmt = MONEY;
+    row.getCell(5).numFmt = '0.0%';
+    ps.mergeCells(`F${pr}:I${pr}`);
+    row.getCell(6).value = p.itemsSummary || 'Sem gastos atribuídos';
+    row.getCell(6).alignment = { wrapText: true, vertical: 'top' };
+    for (let k = 1; k <= 9; k++) {
       row.getCell(k).border = box;
       row.getCell(k).font = font();
       if (i % 2 === 1) row.getCell(k).fill = fill(C.zebra);
@@ -2499,14 +2800,17 @@ async function buildWorkbook() {
   {
     const row = ps.getRow(pr);
     row.getCell(1).value = 'Total';
-    row.getCell(2).value = { formula: `SUM(B${psStart}:B${psEnd})`, result: listBreakdown.rows.reduce((s, p) => s + p.exclusiveCount, 0) };
-    row.getCell(3).value = { formula: `SUM(C${psStart}:C${psEnd})`, result: listBreakdown.rows.reduce((s, p) => s + p.sharedCount, 0) };
-    row.getCell(4).value = { formula: `SUM(D${psStart}:D${psEnd})`, result: listBreakdown.rows.reduce((s, p) => s + p.totalCount, 0) };
-    row.getCell(5).value = { formula: `SUM(E${psStart}:E${psEnd})`, result: listBreakdown.totalExpenses };
-    row.getCell(5).numFmt = MONEY;
-    row.getCell(6).value = { formula: `SUM(F${psStart}:F${psEnd})`, result: listBreakdown.totalExpenses ? 1 : 0 };
-    row.getCell(6).numFmt = '0.0%';
-    for (let k = 1; k <= 6; k++) {
+    row.getCell(2).value = { formula: `SUM(B${psStart}:B${psEnd})`, result: listBreakdown.rows.reduce((s, p) => s + p.exclusiveAmount, 0) };
+    row.getCell(3).value = { formula: `SUM(C${psStart}:C${psEnd})`, result: listBreakdown.rows.reduce((s, p) => s + p.sharedAmount, 0) };
+    row.getCell(4).value = { formula: `SUM(D${psStart}:D${psEnd})`, result: listBreakdown.totalExpenses };
+    row.getCell(5).value = { formula: `SUM(E${psStart}:E${psEnd})`, result: listBreakdown.totalExpenses ? 1 : 0 };
+    row.getCell(2).numFmt = MONEY;
+    row.getCell(3).numFmt = MONEY;
+    row.getCell(4).numFmt = MONEY;
+    row.getCell(5).numFmt = '0.0%';
+    ps.mergeCells(`F${pr}:I${pr}`);
+    row.getCell(6).value = '';
+    for (let k = 1; k <= 9; k++) {
       row.getCell(k).font = font({ bold: true });
       row.getCell(k).fill = fill(C.totalFill);
       row.getCell(k).border = { ...box, top: { style: 'medium', color: { argb: C.navy } } };
@@ -2514,8 +2818,75 @@ async function buildWorkbook() {
     pr += 2;
   }
 
+  // Gastos de cada pessoa por categoria
+  const catPersonRows = [];
+  listBreakdown.rows.filter(p => p.byCategory.length > 0).forEach(p => {
+    p.byCategory.forEach(cat => catPersonRows.push({ person: p.name, cat }));
+  });
+  if (catPersonRows.length) {
+    ps.mergeCells(`A${pr}:I${pr}`);
+    ps.getCell(`A${pr}`).value = 'Gastos de cada pessoa por categoria';
+    ps.getCell(`A${pr}`).font = font({ bold: true, size: 12, color: { argb: C.navy } });
+    ps.getCell(`A${pr}`).border = { bottom: { style: 'medium', color: { argb: C.navy } } };
+    pr += 1;
+
+    ps.mergeCells(`B${pr}:C${pr}`);
+    ps.mergeCells(`D${pr}:G${pr}`);
+    const catHeaders = [
+      { col: 1, title: 'Pessoa', align: 'left' },
+      { col: 2, title: 'Categoria', align: 'left' },
+      { col: 4, title: 'Com o que gastou na categoria', align: 'left' },
+      { col: 8, title: 'Qtd.', align: 'right' },
+      { col: 9, title: 'Valor da parte (R$)', align: 'right' }
+    ];
+    for (let k = 1; k <= 9; k++) {
+      const c = ps.getRow(pr).getCell(k);
+      const h = catHeaders.find(x => x.col === k);
+      if (h) { c.value = h.title; c.alignment = { horizontal: h.align }; }
+      c.font = font({ bold: true, color: { argb: C.navyText } });
+      c.fill = fill(C.navy);
+      c.border = box;
+    }
+    pr += 1;
+
+    const cpStart = pr;
+    catPersonRows.forEach(({ person, cat }, idx) => {
+      const row = ps.getRow(pr);
+      ps.mergeCells(`B${pr}:C${pr}`);
+      ps.mergeCells(`D${pr}:G${pr}`);
+      row.getCell(1).value = person;
+      row.getCell(2).value = cat.name;
+      row.getCell(4).value = cat.itemsText;
+      row.getCell(4).alignment = { wrapText: true, vertical: 'top' };
+      row.getCell(8).value = cat.count;
+      row.getCell(8).alignment = { horizontal: 'right' };
+      row.getCell(9).value = +cat.amount.toFixed(2);
+      row.getCell(9).numFmt = MONEY;
+      for (let k = 1; k <= 9; k++) {
+        row.getCell(k).border = box;
+        row.getCell(k).font = font();
+        if (idx % 2 === 1) row.getCell(k).fill = fill(C.zebra);
+      }
+      pr += 1;
+    });
+    const cpEnd = pr - 1;
+    const cpTot = ps.getRow(pr);
+    ps.mergeCells(`A${pr}:G${pr}`);
+    cpTot.getCell(1).value = 'Total';
+    cpTot.getCell(1).alignment = { horizontal: 'right' };
+    cpTot.getCell(8).value = { formula: `SUM(H${cpStart}:H${cpEnd})`, result: catPersonRows.reduce((s, x) => s + x.cat.count, 0) };
+    cpTot.getCell(9).value = { formula: `SUM(I${cpStart}:I${cpEnd})`, result: +listBreakdown.totalExpenses.toFixed(2) };
+    cpTot.getCell(9).numFmt = MONEY;
+    for (let k = 1; k <= 9; k++) {
+      cpTot.getCell(k).font = font({ bold: true });
+      cpTot.getCell(k).fill = fill(C.totalFill);
+      cpTot.getCell(k).border = { ...box, top: { style: 'medium', color: { argb: C.navy } } };
+    }
+    pr += 2;
+  }
+
   ps.mergeCells(`A${pr}:I${pr}`);
-  ps.getCell(`A${pr}`).value = 'Detalhamento das compras por pessoa';
+  ps.getCell(`A${pr}`).value = 'Todas as compras de cada pessoa';
   ps.getCell(`A${pr}`).font = font({ bold: true, size: 12, color: { argb: C.navy } });
   ps.getCell(`A${pr}`).border = { bottom: { style: 'medium', color: { argb: C.navy } } };
   pr += 1;

@@ -14,7 +14,7 @@ Analisador inteligente de faturas de cartão de crédito exportadas em formato *
 - **Mini-relatório de busca:** ao pesquisar qualquer estabelecimento na tabela, exibe total gasto, quantidade de compras, ticket médio, maior compra e evolução ao longo dos meses importados.
 - **Radar de auditoria:** detecta possíveis cobranças duplicadas, assinaturas recorrentes, pequenas compras acumuladas e projeção de parcelas futuras.
 - **Assistente de voz em português:** leitura em voz alta do resumo da fatura ou da lista completa de gastos filtrados via Web Speech API.
-- **Exportação para Excel (`.xlsx`) e CSV:** gera planilha formatada com abas **Resumo**, **Gastos por Pessoa** (tabela por pessoa + detalhamento com subtotais) e **Lançamentos**, larguras ajustadas, parcelas em texto (`"1 de 2"`), filtro automático e linhas de total (`SUMIFS` e `SUBTOTAL`).
+- **Exportação para Excel (`.xlsx`) e CSV:** gera planilha formatada com abas **Resumo** (incluindo o resumo e detalhamento do que cada pessoa gastou), **Gastos por Pessoa** (tabela por pessoa, resumo por categoria e todas as compras de cada pessoa com subtotais) e **Lançamentos**, larguras ajustadas, parcelas em texto (`"1 de 2"`), filtro automático e linhas de total (`SUMIFS` e `SUBTOTAL`).
 - **Tema claro e escuro:** alternância persistida no navegador e layout responsivo.
 
 ## Estrutura do projeto
